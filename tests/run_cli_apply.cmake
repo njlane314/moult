@@ -14,6 +14,7 @@ file(COPY "${FIXTURE}" DESTINATION "${WORK_DIR}")
 file(WRITE "${WORK_DIR}/legacy_c.c" "void c_file(void) { void* p = NULL; }\n")
 file(WRITE "${WORK_DIR}/legacy_c_api.h" "#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define LEGACY_C_NULL NULL\n#ifdef __cplusplus\n}\n#endif\n")
 file(WRITE "${WORK_DIR}/legacy_c_private.h" "#include <stdint.h>\nstatic void* legacy_c_null(void) { return NULL; }\n")
+file(WRITE "${WORK_DIR}/skip.cpp" "int* skip = NULL;\n")
 file(MAKE_DIRECTORY "${WORK_DIR}/c_lib")
 file(WRITE "${WORK_DIR}/c_lib/only_c.c" "void only_c(void) {}\n")
 file(WRITE "${WORK_DIR}/c_lib/private_impl.h" "static void* private_impl_null(void) { return NULL; }\n")
@@ -23,7 +24,7 @@ set(OUTPUT_DIR "${WORK_DIR}/out")
 set(LANGUAGE_OUTPUT_DIR "${WORK_DIR}/language-out")
 
 execute_process(
-    COMMAND "${MOULT_EXE}" plan --adapter textual --out "${LANGUAGE_OUTPUT_DIR}" "${WORK_DIR}"
+    COMMAND "${MOULT_EXE}" plan --adapter textual --include "*.cpp" --exclude "skip.cpp" --out "${LANGUAGE_OUTPUT_DIR}" "${WORK_DIR}"
     RESULT_VARIABLE language_plan_result
     OUTPUT_VARIABLE language_plan_stdout
     ERROR_VARIABLE language_plan_stderr
@@ -56,6 +57,9 @@ endif()
 if (language_report_stdout MATCHES "private_impl.h")
     message(FATAL_ERROR "header in C-only directory should not appear in C++ modernisation report")
 endif()
+if (language_report_stdout MATCHES "skip.cpp")
+    message(FATAL_ERROR "excluded C++ source should not appear in C++ modernisation report")
+endif()
 
 execute_process(
     COMMAND "${MOULT_EXE}" plan --adapter textual --out "${OUTPUT_DIR}" "${INPUT}"
@@ -87,6 +91,15 @@ if (NOT report_stdout MATCHES "Manual-review findings: 4")
 endif()
 if (NOT report_stdout MATCHES "modernise.use-nullptr")
     message(FATAL_ERROR "expected use-nullptr edit in report")
+endif()
+if (NOT report_stdout MATCHES "Summary by Rule")
+    message(FATAL_ERROR "expected grouped rule summary in report")
+endif()
+if (NOT report_stdout MATCHES "Summary by Directory")
+    message(FATAL_ERROR "expected grouped directory summary in report")
+endif()
+if (NOT report_stdout MATCHES "Recommended Next Action")
+    message(FATAL_ERROR "expected recommended next action in report")
 endif()
 
 execute_process(

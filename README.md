@@ -66,6 +66,7 @@ build/moult plan --target cpp-modernisation --out .moult path/to/src
 build/moult plan --adapter clang --clang-arg -Iinclude path/to/file.cpp
 build/moult plan --adapter clang --compile-commands build path/to/src
 build/moult plan --compile-commands build --out .moult
+build/moult plan path/to/src --exclude 'third_party/**' --include '**/*.cpp'
 build/moult plan --adapter textual path/to/file.cpp
 build/moult report .moult/plan.json
 build/moult diff .moult/plan.json
@@ -84,6 +85,11 @@ paths are omitted, Moult uses the translation units listed in the compile
 database as its input set and normalises relative include/source paths against
 each entry's compile directory.
 
+Use repeated `--include <glob>` and `--exclude <glob>` options to narrow large
+scans. Exclude patterns win over include patterns. Relative patterns match at
+any depth, so `src/vendor/**`, `vendor/**`, and `*.cpp` are practical forms for
+repo-scale scoping.
+
 The fallback textual adapter is still available with `--adapter textual`. It skips
 comments and string/character literals, emits modernisation opportunity facts,
 and then builds the same reviewable plan with evidence, findings, and
@@ -96,7 +102,9 @@ edits to disk. Use `--dry-run` to preview the files that would change, or
 `report` reads the same `plan.json` and prints a human-readable summary of
 planned edits, manual-review findings, conflicts, and diagnostics. When the
 referenced source files are still present, report locations include line and
-column numbers as well as byte ranges.
+column numbers as well as byte ranges. Reports also include grouped summaries by
+rule, directory, and file, plus a recommended next action for reviewing,
+scoping, or applying the plan.
 
 `diff` renders accepted edits as a git-style unified diff and appends
 comment-prefixed manual-review suggestions. Only the accepted-edit portion is a

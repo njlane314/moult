@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -44,6 +45,8 @@ struct CliOptions {
     bool backup = false;
     std::string adapter = "textual";
     std::vector<std::string> clang_args;
+    std::vector<std::string> include_patterns;
+    std::vector<std::string> exclude_patterns;
     std::vector<std::filesystem::path> inputs;
 };
 
@@ -81,6 +84,8 @@ void print_usage(std::ostream& out) {
 #endif
         << "  --clang-arg <arg>            extra argument for libclang; repeat as needed\n"
         << "  --compile-commands <path>    compile_commands.json path or build directory; used as input if no paths are given\n"
+        << "  --include <glob>             keep matching source paths; repeat as needed\n"
+        << "  --exclude <glob>             skip matching source paths; repeat as needed\n"
         << "  --out <directory>            write plan.json, facts.json, evidence.jsonl, findings.sarif\n"
         << "  --min-confidence <level>     low, medium, high, or proven (default: high)\n"
         << "  --include-facts              include facts inside plan.json/stdout JSON\n"
@@ -148,6 +153,73 @@ bool collect_input_files(const std::filesystem::path& input, std::vector<SourceI
         if (auto source_input = source_input_from_path(path)) files.push_back(*source_input);
     }
     return !ec;
+}
+
+std::string normalise_glob_pattern(std::string pattern) {
+    std::replace(pattern.begin(), pattern.end(), '\\', '/');
+    while (pattern.find("//") != std::string::npos) pattern.erase(pattern.find("//"), 1);
+    return pattern;
+}
+
+bool glob_match(std::string_view pattern, std::string_view text) {
+    std::map<std::pair<std::size_t, std::size_t>, bool> memo;
+    auto match = [&](auto&& self, std::size_t pi, std::size_t ti) -> bool {
+        const auto key = std::make_pair(pi, ti);
+        if (const auto it = memo.find(key); it != memo.end()) return it->second;
+
+        bool result = false;
+        if (pi == pattern.size()) {
+            result = ti == text.size();
+        } else if (pattern[pi] == '*') {
+            const bool deep = pi + 1 < pattern.size() && pattern[pi + 1] == '*';
+            std::size_t next_pi = pi + (deep ? 2 : 1);
+            while (next_pi < pattern.size() && pattern[next_pi] == '*') ++next_pi;
+
+            if (deep && next_pi < pattern.size() && pattern[next_pi] == '/') {
+                result = self(self, next_pi + 1, ti);
+            }
+            if (!result) result = self(self, next_pi, ti);
+
+            for (std::size_t next_ti = ti; !result && next_ti < text.size(); ++next_ti) {
+                if (!deep && text[next_ti] == '/') break;
+                result = self(self, next_pi, next_ti + 1);
+            }
+        } else if (pattern[pi] == '?') {
+            result = ti < text.size() && text[ti] != '/' && self(self, pi + 1, ti + 1);
+        } else {
+            result = ti < text.size() && pattern[pi] == text[ti] && self(self, pi + 1, ti + 1);
+        }
+
+        memo.emplace(key, result);
+        return result;
+    };
+    return match(match, 0, 0);
+}
+
+bool glob_matches_path(std::string pattern, const std::filesystem::path& path) {
+    pattern = normalise_glob_pattern(std::move(pattern));
+    const std::string full = path.generic_string();
+    const std::string filename = path.filename().generic_string();
+    const bool has_slash = pattern.find('/') != std::string::npos;
+    if (pattern.empty()) return false;
+    if (!has_slash) return glob_match(pattern, filename) || glob_match("**/" + pattern, full);
+    if (!pattern.empty() && pattern.front() == '/') return glob_match(pattern, full);
+    return glob_match(pattern, full) || glob_match("**/" + pattern, full);
+}
+
+bool matches_any_pattern(const std::vector<std::string>& patterns, const std::filesystem::path& path) {
+    return std::any_of(patterns.begin(), patterns.end(), [&](const std::string& pattern) {
+        return glob_matches_path(pattern, path);
+    });
+}
+
+void apply_path_filters(const CliOptions& cli, std::vector<SourceInput>& files) {
+    files.erase(std::remove_if(files.begin(), files.end(), [&](const SourceInput& file) {
+                    if (!cli.include_patterns.empty() && !matches_any_pattern(cli.include_patterns, file.path)) return true;
+                    if (matches_any_pattern(cli.exclude_patterns, file.path)) return true;
+                    return false;
+                }),
+                files.end());
 }
 
 bool read_text_file(const std::filesystem::path& path, std::string& out) {
@@ -624,6 +696,116 @@ std::string compact_text(std::string value) {
     return value;
 }
 
+struct ReportBucket {
+    std::size_t edits = 0;
+    std::size_t manual = 0;
+    std::size_t conflicts = 0;
+    std::size_t diagnostics = 0;
+
+    [[nodiscard]] std::size_t total() const noexcept {
+        return edits + manual + conflicts + diagnostics;
+    }
+};
+
+enum class ReportBucketKind {
+    Edit,
+    Manual,
+    Conflict,
+    Diagnostic
+};
+
+void add_report_bucket(std::map<std::string, ReportBucket>& buckets, std::string key, ReportBucketKind kind) {
+    if (key.empty()) key = "no source range";
+    ReportBucket& bucket = buckets[std::move(key)];
+    switch (kind) {
+        case ReportBucketKind::Edit: ++bucket.edits; break;
+        case ReportBucketKind::Manual: ++bucket.manual; break;
+        case ReportBucketKind::Conflict: ++bucket.conflicts; break;
+        case ReportBucketKind::Diagnostic: ++bucket.diagnostics; break;
+    }
+}
+
+std::optional<std::string> optional_range_file(const JsonValue& object, std::string_view name = "range") {
+    const JsonValue* range = optional_object_field(object, name);
+    if (!range || range->type != JsonValue::Type::Object) return std::nullopt;
+    const JsonValue* file = optional_object_field(*range, "file");
+    if (!file || file->type != JsonValue::Type::String) return std::nullopt;
+    return file->string;
+}
+
+std::string directory_key_for_file(const std::string& file) {
+    if (file.empty()) return "no source range";
+    const auto parent = std::filesystem::path(file).parent_path();
+    return parent.empty() ? "." : parent.generic_string();
+}
+
+std::vector<std::pair<std::string, ReportBucket>> sorted_report_buckets(const std::map<std::string, ReportBucket>& buckets) {
+    std::vector<std::pair<std::string, ReportBucket>> out(buckets.begin(), buckets.end());
+    std::sort(out.begin(), out.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.second.total() != rhs.second.total()) return lhs.second.total() > rhs.second.total();
+        return lhs.first < rhs.first;
+    });
+    return out;
+}
+
+void print_report_buckets(std::ostream& out,
+                          std::string_view title,
+                          const std::map<std::string, ReportBucket>& buckets,
+                          std::size_t limit = 12) {
+    out << "\n" << title << "\n";
+    if (buckets.empty()) {
+        out << "  none\n";
+        return;
+    }
+    const auto sorted = sorted_report_buckets(buckets);
+    const std::size_t shown = std::min(limit, sorted.size());
+    for (std::size_t i = 0; i < shown; ++i) {
+        const auto& [key, bucket] = sorted[i];
+        out << "  " << compact_text(key)
+            << "  total=" << bucket.total()
+            << " edits=" << bucket.edits
+            << " manual=" << bucket.manual
+            << " conflicts=" << bucket.conflicts
+            << " diagnostics=" << bucket.diagnostics << "\n";
+    }
+    if (shown < sorted.size()) out << "  ... " << (sorted.size() - shown) << " more\n";
+}
+
+void print_recommended_next_action(std::ostream& out,
+                                   const std::filesystem::path& plan_path,
+                                   bool has_errors,
+                                   std::size_t accepted_edits,
+                                   std::size_t manual_review,
+                                   std::size_t conflicts,
+                                   std::size_t diagnostics) {
+    const std::size_t total = accepted_edits + manual_review + conflicts + diagnostics;
+    out << "\nRecommended Next Action\n";
+    if (has_errors || conflicts > 0) {
+        out << "  Resolve conflicts and diagnostics before applying edits.\n";
+        out << "  Start with: moult review " << plan_path << "\n";
+        return;
+    }
+    if (total > 500) {
+        out << "  Scope is large. Re-run plan with --include/--exclude to isolate one subsystem before applying edits.\n";
+        out << "  Then inspect with: moult review " << plan_path << "\n";
+        return;
+    }
+    if (accepted_edits > 0) {
+        out << "  Review the patch with: moult diff " << plan_path << "\n";
+        out << "  Then dry-run application with: moult apply --dry-run " << plan_path << "\n";
+        return;
+    }
+    if (manual_review > 0) {
+        out << "  Triage manual-review findings with: moult review " << plan_path << "\n";
+        return;
+    }
+    if (diagnostics > 0) {
+        out << "  Inspect diagnostics, then rerun the plan after parser/input issues are fixed.\n";
+        return;
+    }
+    out << "  No migration work was found. Broaden the input paths or enable another target.\n";
+}
+
 std::string format_range(const JsonValue& range_obj, SourceLineCache& line_cache) {
     const std::string file = json_string_field(range_obj, "file");
     const std::size_t begin = json_number_field(range_obj, "begin");
@@ -960,15 +1142,57 @@ int report_plan(const CliOptions& cli) {
         for (const auto& finding : findings.array) {
             if (finding.type == JsonValue::Type::Object && !finding_is_planned_edit(finding)) ++review_count;
         }
+        std::map<std::string, ReportBucket> by_rule;
+        std::map<std::string, ReportBucket> by_directory;
+        std::map<std::string, ReportBucket> by_file;
 
+        auto add_source_summary = [&](const JsonValue& object, ReportBucketKind kind, std::string_view range_name = "range") {
+            const std::string file = optional_range_file(object, range_name).value_or("no source range");
+            add_report_bucket(by_file, file, kind);
+            add_report_bucket(by_directory, file == "no source range" ? file : directory_key_for_file(file), kind);
+        };
+
+        for (const auto& edit : edits.array) {
+            if (edit.type != JsonValue::Type::Object) continue;
+            add_report_bucket(by_rule, json_string_field(edit, "rule_id"), ReportBucketKind::Edit);
+            add_source_summary(edit, ReportBucketKind::Edit);
+        }
+        for (const auto& finding : findings.array) {
+            if (finding.type != JsonValue::Type::Object || finding_is_planned_edit(finding)) continue;
+            add_report_bucket(by_rule, json_string_field(finding, "rule_id"), ReportBucketKind::Manual);
+            add_source_summary(finding, ReportBucketKind::Manual);
+        }
+        for (const auto& conflict : conflicts.array) {
+            if (conflict.type != JsonValue::Type::Object) continue;
+            add_report_bucket(by_rule, "edit conflict", ReportBucketKind::Conflict);
+            add_source_summary(conflict, ReportBucketKind::Conflict, "proposed_range");
+        }
+        for (const auto& diagnostic : diagnostics.array) {
+            if (diagnostic.type != JsonValue::Type::Object) continue;
+            add_report_bucket(by_rule, "diagnostic:" + json_string_field(diagnostic, "code"), ReportBucketKind::Diagnostic);
+            add_source_summary(diagnostic, ReportBucketKind::Diagnostic);
+        }
+
+        const bool has_errors = json_bool_field(root, "has_errors");
+        const std::size_t accepted_edit_count = json_number_field(root, "accepted_edit_count");
         std::cout << "Moult Report\n";
         std::cout << "Target: " << json_string_field(root, "target") << "\n";
         std::cout << "Action: " << json_string_field(root, "action") << "\n";
-        std::cout << "Status: " << (json_bool_field(root, "has_errors") ? "errors" : "ok") << "\n";
-        std::cout << "Accepted edits: " << json_number_field(root, "accepted_edit_count") << "\n";
+        std::cout << "Status: " << (has_errors ? "errors" : "ok") << "\n";
+        std::cout << "Accepted edits: " << accepted_edit_count << "\n";
         std::cout << "Manual-review findings: " << review_count << "\n";
         std::cout << "Conflicts: " << json_number_field(root, "conflict_count") << "\n";
         std::cout << "Diagnostics: " << diagnostics.array.size() << "\n";
+        print_report_buckets(std::cout, "Summary by Rule", by_rule);
+        print_report_buckets(std::cout, "Summary by Directory", by_directory);
+        print_report_buckets(std::cout, "Summary by File", by_file);
+        print_recommended_next_action(std::cout,
+                                      cli.inputs.front(),
+                                      has_errors,
+                                      accepted_edit_count,
+                                      review_count,
+                                      json_number_field(root, "conflict_count"),
+                                      diagnostics.array.size());
 
         if (edits.array.empty()) {
             print_report_section_empty(std::cout, "Planned Edits");
@@ -1219,6 +1443,18 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
             options.compile_commands_path = path;
             continue;
         }
+        if (arg == "--include") {
+            auto value = require_value("--include");
+            if (!value) return std::nullopt;
+            options.include_patterns.push_back(*value);
+            continue;
+        }
+        if (arg == "--exclude") {
+            auto value = require_value("--exclude");
+            if (!value) return std::nullopt;
+            options.exclude_patterns.push_back(*value);
+            continue;
+        }
         if (arg == "--out") {
             auto value = require_value("--out");
             if (!value) return std::nullopt;
@@ -1348,8 +1584,9 @@ int main(int argc, char** argv) {
                     return lhs.path == rhs.path;
                 }),
                 files.end());
+    apply_path_filters(cli, files);
     if (files.empty()) {
-        std::cerr << "no C++ source-like files found\n";
+        std::cerr << "no C++ source-like files found after language and path filters\n";
         return 1;
     }
 
