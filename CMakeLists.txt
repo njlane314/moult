@@ -115,7 +115,10 @@ if (MOULT_BUILD_CLANG_ADAPTER)
 endif()
 
 if (MOULT_BUILD_CLI)
-    add_executable(moult apps/moult.cpp)
+    add_executable(moult
+        apps/moult.cpp
+        apps/moult_review.cpp
+    )
     target_link_libraries(moult PRIVATE moult::cpp_modernization)
     moult_apply_apple_libcxx_workaround(moult)
     if (MOULT_BUILD_CLANG_ADAPTER)

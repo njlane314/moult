@@ -1,5 +1,6 @@
 #include "moult/core/api.hpp"
 #include "moult/cpp/modernization.hpp"
+#include "moult_review.hpp"
 #ifdef MOULT_HAVE_CLANG_ADAPTER
 #include "moult/clang/adapter.hpp"
 #endif
@@ -27,7 +28,8 @@ enum class Command {
     Plan,
     Apply,
     Report,
-    Diff
+    Diff,
+    Review
 };
 
 struct CliOptions {
@@ -56,6 +58,7 @@ void print_usage(std::ostream& out) {
         << "       moult apply [options] <plan.json>\n"
         << "       moult report <plan.json>\n"
         << "       moult diff <plan.json>\n"
+        << "       moult review <plan.json-or-output-directory>\n"
         << "\n"
         << "options:\n"
         << "  --target <name>              target to run (default: cpp-modernisation)\n"
@@ -1063,6 +1066,8 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
         options.command = Command::Report;
     } else if (command == "diff") {
         options.command = Command::Diff;
+    } else if (command == "review") {
+        options.command = Command::Review;
     } else {
         std::cerr << "unknown command: " << command << "\n";
         print_usage(std::cerr);
@@ -1165,17 +1170,16 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
         options.inputs.emplace_back(arg);
     }
 
-    if (options.inputs.empty() &&
-        (options.command == Command::Apply || options.command == Command::Report || options.command == Command::Diff ||
-         !options.compile_commands_path)) {
-        std::cerr << (options.command == Command::Apply || options.command == Command::Report || options.command == Command::Diff
-                          ? "plan.json path is required\n"
-                          : "at least one input file, directory, or compile database is required\n");
+    const bool artefact_command = options.command == Command::Apply || options.command == Command::Report ||
+                                  options.command == Command::Diff || options.command == Command::Review;
+    if (options.inputs.empty() && (artefact_command || !options.compile_commands_path)) {
+        std::cerr << (artefact_command ? "plan.json path or output directory is required\n"
+                                      : "at least one input file, directory, or compile database is required\n");
         print_usage(std::cerr);
         exit_code = 2;
         return std::nullopt;
     }
-    if (options.command == Command::Apply || options.command == Command::Report || options.command == Command::Diff) return options;
+    if (artefact_command) return options;
 
     if (options.target != moult::cpp_modernization::target_name &&
         options.target != moult::cpp_modernization::legacy_target_name) {
@@ -1213,6 +1217,7 @@ int main(int argc, char** argv) {
     if (cli.command == Command::Apply) return apply_plan(cli);
     if (cli.command == Command::Report) return report_plan(cli);
     if (cli.command == Command::Diff) return diff_plan(cli);
+    if (cli.command == Command::Review) return moult::cli::run_review_tui(cli.inputs.front());
 
     std::vector<CompileCommandEntry> compile_command_entries;
     if (cli.compile_commands_path) {

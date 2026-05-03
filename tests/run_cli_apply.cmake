@@ -70,6 +70,19 @@ if (NOT diff_stdout MATCHES "modernise.replace-auto-ptr")
 endif()
 
 execute_process(
+    COMMAND "${MOULT_EXE}" review "${OUTPUT_DIR}/plan.json"
+    RESULT_VARIABLE review_result
+    OUTPUT_VARIABLE review_stdout
+    ERROR_VARIABLE review_stderr
+)
+if (review_result EQUAL 0)
+    message(FATAL_ERROR "moult review unexpectedly succeeded without an interactive terminal\nstdout:\n${review_stdout}\nstderr:\n${review_stderr}")
+endif()
+if (NOT review_stderr MATCHES "requires an interactive terminal")
+    message(FATAL_ERROR "expected non-interactive review error\nstdout:\n${review_stdout}\nstderr:\n${review_stderr}")
+endif()
+
+execute_process(
     COMMAND "${MOULT_EXE}" apply --backup "${OUTPUT_DIR}/plan.json"
     RESULT_VARIABLE apply_result
     OUTPUT_VARIABLE apply_stdout

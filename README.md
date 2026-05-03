@@ -69,6 +69,7 @@ build/moult plan --compile-commands build --out .moult
 build/moult plan --adapter textual path/to/file.cpp
 build/moult report .moult/plan.json
 build/moult diff .moult/plan.json
+build/moult review .moult
 build/moult apply --backup .moult/plan.json
 ```
 
@@ -101,6 +102,14 @@ column numbers as well as byte ranges.
 comment-prefixed manual-review suggestions. Only the accepted-edit portion is a
 patch; manual-review entries are advisory because Moult has not produced safe
 replacement text for them.
+
+`review` opens an interactive terminal review UI for a `plan.json` path or a
+Moult output directory. It lets you move through edits, manual-review findings,
+conflicts, diagnostics, evidence, and guard results; mark items accepted,
+rejected, or unset; save `review.json`; and export `plan.reviewed.json` with
+rejected edits removed. For automatic edits, the selected item includes a
+focused git-style patch hunk, with colour used for item types, confidence,
+decisions, and diff additions/removals.
 
 Currently supported checks:
 
