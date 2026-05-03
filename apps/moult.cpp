@@ -25,7 +25,9 @@ namespace {
 enum class Command {
     Scan,
     Plan,
-    Apply
+    Apply,
+    Report,
+    Diff
 };
 
 struct CliOptions {
@@ -52,6 +54,8 @@ struct CompileCommandEntry {
 void print_usage(std::ostream& out) {
     out << "usage: moult <scan|plan> [options] [file-or-directory]...\n"
         << "       moult apply [options] <plan.json>\n"
+        << "       moult report <plan.json>\n"
+        << "       moult diff <plan.json>\n"
         << "\n"
         << "options:\n"
         << "  --target <name>              target to run (default: cpp-modernisation)\n"
@@ -66,7 +70,7 @@ void print_usage(std::ostream& out) {
         << "  --out <directory>            write plan.json, facts.json, evidence.jsonl, findings.sarif\n"
         << "  --min-confidence <level>     low, medium, high, or proven (default: high)\n"
         << "  --include-facts              include facts inside plan.json/stdout JSON\n"
-        << "  --dry-run                    for apply, report files that would change\n"
+        << "  --dry-run                    for apply, list files that would change\n"
         << "  --backup                     for apply, write <file>.moult.bak before changing files\n"
         << "  --format json                accepted for compatibility; JSON is the only format today\n"
         << "  --help                       show this help\n";
@@ -282,10 +286,39 @@ std::string json_string_field(const JsonValue& object, std::string_view name) {
     return value.string;
 }
 
+std::string optional_json_string_field(const JsonValue& object, std::string_view name, std::string fallback = {}) {
+    const JsonValue* value = optional_object_field(object, name);
+    if (!value) return fallback;
+    if (value->type != JsonValue::Type::String) throw std::runtime_error("expected string field: " + std::string(name));
+    return value->string;
+}
+
 std::size_t json_number_field(const JsonValue& object, std::string_view name) {
     const JsonValue& value = object_field(object, name);
     if (value.type != JsonValue::Type::Number) throw std::runtime_error("expected number field: " + std::string(name));
     return value.number;
+}
+
+bool json_bool_field(const JsonValue& object, std::string_view name) {
+    const JsonValue& value = object_field(object, name);
+    if (value.type != JsonValue::Type::Bool) throw std::runtime_error("expected bool field: " + std::string(name));
+    return value.boolean;
+}
+
+const JsonValue& json_array_field(const JsonValue& object, std::string_view name) {
+    const JsonValue& value = object_field(object, name);
+    if (value.type != JsonValue::Type::Array) throw std::runtime_error("expected array field: " + std::string(name));
+    return value;
+}
+
+std::map<std::string, std::string> json_string_attributes(const JsonValue& object) {
+    std::map<std::string, std::string> out;
+    const JsonValue* attrs = optional_object_field(object, "attributes");
+    if (!attrs || attrs->type != JsonValue::Type::Object) return out;
+    for (const auto& [key, value] : attrs->object) {
+        if (value.type == JsonValue::Type::String) out.emplace(key, value.string);
+    }
+    return out;
 }
 
 std::vector<std::string> split_command_line(std::string_view command) {
@@ -456,6 +489,205 @@ std::vector<std::filesystem::path> source_files_from_compile_commands(const std:
     return out;
 }
 
+class SourceLineCache {
+public:
+    std::optional<moult::core::LineColumn> line_column(const std::string& file, std::size_t offset) {
+        auto it = sources_.find(file);
+        if (it == sources_.end()) {
+            std::string text;
+            if (read_text_file(file, text)) {
+                it = sources_.emplace(file, moult::core::SourceBuffer(file, std::move(text))).first;
+            } else {
+                missing_.insert(file);
+                return std::nullopt;
+            }
+        }
+        if (!it->second.contains(offset)) return std::nullopt;
+        return it->second.line_column(offset);
+    }
+
+private:
+    std::map<std::string, moult::core::SourceBuffer> sources_;
+    std::set<std::string> missing_;
+};
+
+std::string compact_text(std::string value) {
+    for (char& c : value) {
+        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+    }
+    constexpr std::size_t max_len = 96;
+    if (value.size() > max_len) value = value.substr(0, max_len - 3) + "...";
+    return value;
+}
+
+std::string format_range(const JsonValue& range_obj, SourceLineCache& line_cache) {
+    const std::string file = json_string_field(range_obj, "file");
+    const std::size_t begin = json_number_field(range_obj, "begin");
+    const std::size_t end = json_number_field(range_obj, "end");
+    std::ostringstream out;
+    out << file;
+    if (auto lc = line_cache.line_column(file, begin)) {
+        out << ":" << lc->line << ":" << lc->column;
+    }
+    out << " (bytes " << begin << "-" << end << ")";
+    return out.str();
+}
+
+std::string format_optional_range(const JsonValue& object, SourceLineCache& line_cache) {
+    const JsonValue* range = optional_object_field(object, "range");
+    if (!range || range->type != JsonValue::Type::Object) return "no source range";
+    return format_range(*range, line_cache);
+}
+
+bool finding_is_planned_edit(const JsonValue& finding) {
+    const auto attrs = json_string_attributes(finding);
+    const auto it = attrs.find("edit_status");
+    return it != attrs.end() && it->second == "planned";
+}
+
+void print_report_section_empty(std::ostream& out, std::string_view label) {
+    out << "\n" << label << "\n";
+    out << "  none\n";
+}
+
+std::vector<std::string> split_lines_preserve_newlines(std::string_view text) {
+    std::vector<std::string> lines;
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        const std::size_t next = text.find('\n', pos);
+        if (next == std::string_view::npos) {
+            lines.emplace_back(text.substr(pos));
+            break;
+        }
+        lines.emplace_back(text.substr(pos, next - pos + 1));
+        pos = next + 1;
+    }
+    return lines;
+}
+
+enum class DiffOpKind {
+    Equal,
+    Delete,
+    Insert
+};
+
+struct DiffOp {
+    DiffOpKind kind = DiffOpKind::Equal;
+    std::string line;
+    std::size_t old_line = 1;
+    std::size_t new_line = 1;
+};
+
+std::vector<DiffOp> line_diff(std::string_view old_text, std::string_view new_text) {
+    const auto old_lines = split_lines_preserve_newlines(old_text);
+    const auto new_lines = split_lines_preserve_newlines(new_text);
+    const std::size_t rows = old_lines.size() + 1;
+    const std::size_t cols = new_lines.size() + 1;
+    std::vector<std::size_t> dp(rows * cols, 0);
+    auto cell = [&](std::size_t row, std::size_t col) -> std::size_t& {
+        return dp[row * cols + col];
+    };
+
+    for (std::size_t i = old_lines.size(); i-- > 0;) {
+        for (std::size_t j = new_lines.size(); j-- > 0;) {
+            if (old_lines[i] == new_lines[j]) {
+                cell(i, j) = cell(i + 1, j + 1) + 1;
+            } else {
+                cell(i, j) = std::max(cell(i + 1, j), cell(i, j + 1));
+            }
+        }
+    }
+
+    std::vector<DiffOp> ops;
+    std::size_t i = 0;
+    std::size_t j = 0;
+    while (i < old_lines.size() || j < new_lines.size()) {
+        if (i < old_lines.size() && j < new_lines.size() && old_lines[i] == new_lines[j]) {
+            ops.push_back(DiffOp{DiffOpKind::Equal, old_lines[i], i + 1, j + 1});
+            ++i;
+            ++j;
+        } else if (i < old_lines.size() && (j == new_lines.size() || cell(i + 1, j) >= cell(i, j + 1))) {
+            ops.push_back(DiffOp{DiffOpKind::Delete, old_lines[i], i + 1, j + 1});
+            ++i;
+        } else {
+            ops.push_back(DiffOp{DiffOpKind::Insert, new_lines[j], i + 1, j + 1});
+            ++j;
+        }
+    }
+    return ops;
+}
+
+bool diff_op_is_change(const DiffOp& op) {
+    return op.kind == DiffOpKind::Delete || op.kind == DiffOpKind::Insert;
+}
+
+void write_diff_line(std::ostream& out, char prefix, const std::string& line) {
+    out << prefix << line;
+    if (line.empty() || line.back() != '\n') out << "\n";
+}
+
+std::string unified_range(std::size_t start, std::size_t count) {
+    if (count == 0) return std::to_string(start == 0 ? 0 : start - 1) + ",0";
+    if (count == 1) return std::to_string(start);
+    return std::to_string(start) + "," + std::to_string(count);
+}
+
+void write_unified_diff(std::ostream& out,
+                        const std::string& file,
+                        std::string_view old_text,
+                        std::string_view new_text,
+                        std::size_t context_lines = 3) {
+    const auto ops = line_diff(old_text, new_text);
+    out << "diff --git a/" << file << " b/" << file << "\n";
+    out << "--- a/" << file << "\n";
+    out << "+++ b/" << file << "\n";
+
+    std::size_t cursor = 0;
+    while (cursor < ops.size()) {
+        while (cursor < ops.size() && !diff_op_is_change(ops[cursor])) ++cursor;
+        if (cursor >= ops.size()) break;
+
+        std::size_t hunk_start = cursor > context_lines ? cursor - context_lines : 0;
+        std::size_t last_change = cursor;
+        std::size_t scan = cursor + 1;
+        while (scan < ops.size()) {
+            if (diff_op_is_change(ops[scan])) last_change = scan;
+            if (scan > last_change + context_lines) break;
+            ++scan;
+        }
+        const std::size_t hunk_end = std::min(ops.size(), last_change + context_lines + 1);
+
+        std::size_t old_start = 0;
+        std::size_t new_start = 0;
+        std::size_t old_count = 0;
+        std::size_t new_count = 0;
+        for (std::size_t i = hunk_start; i < hunk_end; ++i) {
+            if (ops[i].kind != DiffOpKind::Insert) {
+                if (old_count == 0) old_start = ops[i].old_line;
+                ++old_count;
+            }
+            if (ops[i].kind != DiffOpKind::Delete) {
+                if (new_count == 0) new_start = ops[i].new_line;
+                ++new_count;
+            }
+        }
+        if (old_count == 0) old_start = ops[hunk_start].old_line;
+        if (new_count == 0) new_start = ops[hunk_start].new_line;
+
+        out << "@@ -" << unified_range(old_start, old_count)
+            << " +" << unified_range(new_start, new_count) << " @@\n";
+        for (std::size_t i = hunk_start; i < hunk_end; ++i) {
+            switch (ops[i].kind) {
+                case DiffOpKind::Equal: write_diff_line(out, ' ', ops[i].line); break;
+                case DiffOpKind::Delete: write_diff_line(out, '-', ops[i].line); break;
+                case DiffOpKind::Insert: write_diff_line(out, '+', ops[i].line); break;
+            }
+        }
+
+        cursor = hunk_end;
+    }
+}
+
 #ifdef MOULT_HAVE_CLANG_ADAPTER
 moult::clang_adapter::ClangCppModernizationAdapter::CompileCommandMap compile_command_map_from_entries(
     const std::vector<CompileCommandEntry>& entries) {
@@ -592,6 +824,215 @@ int apply_plan(const CliOptions& cli) {
     return 0;
 }
 
+int report_plan(const CliOptions& cli) {
+    if (cli.inputs.size() != 1) {
+        std::cerr << "report requires exactly one plan.json path\n";
+        return 2;
+    }
+
+    std::string text;
+    if (!read_text_file(cli.inputs.front(), text)) {
+        std::cerr << "failed to read plan: " << cli.inputs.front() << "\n";
+        return 1;
+    }
+
+    JsonValue root;
+    try {
+        root = JsonParser(text).parse();
+        if (root.type != JsonValue::Type::Object) throw std::runtime_error("plan.json must be an object");
+    } catch (const std::exception& ex) {
+        std::cerr << ex.what() << "\n";
+        return 1;
+    }
+
+    SourceLineCache line_cache;
+    try {
+        const JsonValue& edits = json_array_field(root, "edits");
+        const JsonValue& findings = json_array_field(root, "findings");
+        const JsonValue& conflicts = json_array_field(root, "edit_conflicts");
+        const JsonValue& diagnostics = json_array_field(root, "diagnostics");
+
+        std::size_t review_count = 0;
+        for (const auto& finding : findings.array) {
+            if (finding.type == JsonValue::Type::Object && !finding_is_planned_edit(finding)) ++review_count;
+        }
+
+        std::cout << "Moult Report\n";
+        std::cout << "Target: " << json_string_field(root, "target") << "\n";
+        std::cout << "Action: " << json_string_field(root, "action") << "\n";
+        std::cout << "Status: " << (json_bool_field(root, "has_errors") ? "errors" : "ok") << "\n";
+        std::cout << "Accepted edits: " << json_number_field(root, "accepted_edit_count") << "\n";
+        std::cout << "Manual-review findings: " << review_count << "\n";
+        std::cout << "Conflicts: " << json_number_field(root, "conflict_count") << "\n";
+        std::cout << "Diagnostics: " << diagnostics.array.size() << "\n";
+
+        if (edits.array.empty()) {
+            print_report_section_empty(std::cout, "Planned Edits");
+        } else {
+            std::cout << "\nPlanned Edits\n";
+            std::size_t index = 1;
+            for (const auto& edit : edits.array) {
+                if (edit.type != JsonValue::Type::Object) continue;
+                const JsonValue& range = object_field(edit, "range");
+                const std::string replacement = json_string_field(edit, "replacement");
+                std::cout << "  " << index++ << ". " << json_string_field(edit, "rule_id") << " ["
+                          << json_string_field(edit, "confidence") << "]\n";
+                std::cout << "     " << format_range(range, line_cache) << "\n";
+                std::cout << "     replacement: "
+                          << (replacement.empty() ? "<remove text>" : compact_text(replacement)) << "\n";
+            }
+        }
+
+        if (review_count == 0) {
+            print_report_section_empty(std::cout, "Manual Review");
+        } else {
+            std::cout << "\nManual Review\n";
+            std::size_t index = 1;
+            for (const auto& finding : findings.array) {
+                if (finding.type != JsonValue::Type::Object || finding_is_planned_edit(finding)) continue;
+                std::cout << "  " << index++ << ". " << json_string_field(finding, "rule_id") << " ["
+                          << json_string_field(finding, "severity") << ", "
+                          << json_string_field(finding, "confidence") << "]\n";
+                std::cout << "     " << format_optional_range(finding, line_cache) << "\n";
+                std::cout << "     " << json_string_field(finding, "title") << "\n";
+                std::cout << "     " << compact_text(json_string_field(finding, "message")) << "\n";
+            }
+        }
+
+        if (conflicts.array.empty()) {
+            print_report_section_empty(std::cout, "Conflicts");
+        } else {
+            std::cout << "\nConflicts\n";
+            std::size_t index = 1;
+            for (const auto& conflict : conflicts.array) {
+                if (conflict.type != JsonValue::Type::Object) continue;
+                std::cout << "  " << index++ << ". " << optional_json_string_field(conflict, "message", "edit conflict")
+                          << "\n";
+                if (const JsonValue* range = optional_object_field(conflict, "proposed_range")) {
+                    if (range->type == JsonValue::Type::Object) std::cout << "     " << format_range(*range, line_cache) << "\n";
+                }
+            }
+        }
+
+        if (diagnostics.array.empty()) {
+            print_report_section_empty(std::cout, "Diagnostics");
+        } else {
+            std::cout << "\nDiagnostics\n";
+            std::size_t index = 1;
+            for (const auto& diagnostic : diagnostics.array) {
+                if (diagnostic.type != JsonValue::Type::Object) continue;
+                std::cout << "  " << index++ << ". " << json_string_field(diagnostic, "severity") << " "
+                          << json_string_field(diagnostic, "code") << "\n";
+                std::cout << "     " << format_optional_range(diagnostic, line_cache) << "\n";
+                std::cout << "     " << compact_text(json_string_field(diagnostic, "message")) << "\n";
+            }
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "failed to render report: " << ex.what() << "\n";
+        return 1;
+    }
+
+    return 0;
+}
+
+int diff_plan(const CliOptions& cli) {
+    if (cli.inputs.size() != 1) {
+        std::cerr << "diff requires exactly one plan.json path\n";
+        return 2;
+    }
+
+    std::string text;
+    if (!read_text_file(cli.inputs.front(), text)) {
+        std::cerr << "failed to read plan: " << cli.inputs.front() << "\n";
+        return 1;
+    }
+
+    JsonValue root;
+    try {
+        root = JsonParser(text).parse();
+        if (root.type != JsonValue::Type::Object) throw std::runtime_error("plan.json must be an object");
+    } catch (const std::exception& ex) {
+        std::cerr << ex.what() << "\n";
+        return 1;
+    }
+
+    std::vector<moult::core::TextEdit> edits;
+    try {
+        edits = edits_from_plan_json(cli.inputs.front());
+    } catch (const std::exception& ex) {
+        std::cerr << ex.what() << "\n";
+        return 1;
+    }
+
+    moult::core::SourceStore sources;
+    std::set<std::string> files;
+    for (const auto& edit : edits) files.insert(edit.range.file);
+    for (const auto& file : files) {
+        if (!sources.load_file(file)) {
+            std::cerr << "failed to load file for diff: " << file << "\n";
+            return 1;
+        }
+    }
+
+    std::map<std::string, std::string> modified;
+    if (!edits.empty()) {
+        moult::core::EditSet edit_set;
+        for (auto edit : edits) {
+            const auto result = edit_set.add(std::move(edit), &sources);
+            if (result.outcome == moult::core::EditAddOutcome::Duplicate) continue;
+            if (result.outcome != moult::core::EditAddOutcome::Accepted) {
+                std::cerr << "cannot diff edit " << result.edit_id << ": invalid or conflicting range\n";
+                return 1;
+            }
+        }
+        try {
+            modified = edit_set.apply_to_memory(sources);
+        } catch (const std::exception& ex) {
+            std::cerr << ex.what() << "\n";
+            return 1;
+        }
+    }
+
+    if (modified.empty()) {
+        std::cout << "# No accepted edits to diff.\n";
+    } else {
+        bool first = true;
+        for (const auto& [file, new_text] : modified) {
+            const auto* source = sources.get(file);
+            if (!source) continue;
+            if (!first) std::cout << "\n";
+            first = false;
+            write_unified_diff(std::cout, file, source->text(), new_text);
+        }
+    }
+
+    SourceLineCache line_cache;
+    const JsonValue& findings = json_array_field(root, "findings");
+    std::size_t review_count = 0;
+    for (const auto& finding : findings.array) {
+        if (finding.type == JsonValue::Type::Object && !finding_is_planned_edit(finding)) ++review_count;
+    }
+
+    std::cout << "\n# Manual Review Suggestions\n";
+    if (review_count == 0) {
+        std::cout << "# none\n";
+        return 0;
+    }
+
+    std::size_t index = 1;
+    for (const auto& finding : findings.array) {
+        if (finding.type != JsonValue::Type::Object || finding_is_planned_edit(finding)) continue;
+        std::cout << "# " << index++ << ". " << json_string_field(finding, "rule_id") << " ["
+                  << json_string_field(finding, "severity") << ", "
+                  << json_string_field(finding, "confidence") << "]\n";
+        std::cout << "#    " << format_optional_range(finding, line_cache) << "\n";
+        std::cout << "#    " << compact_text(json_string_field(finding, "title")) << "\n";
+        std::cout << "#    " << compact_text(json_string_field(finding, "message")) << "\n";
+    }
+
+    return 0;
+}
+
 std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
     if (argc < 2) {
         print_usage(std::cerr);
@@ -618,6 +1059,10 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
     } else if (command == "apply") {
         options.command = Command::Apply;
         options.action = moult::core::PlanAction::Apply;
+    } else if (command == "report") {
+        options.command = Command::Report;
+    } else if (command == "diff") {
+        options.command = Command::Diff;
     } else {
         std::cerr << "unknown command: " << command << "\n";
         print_usage(std::cerr);
@@ -720,14 +1165,17 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
         options.inputs.emplace_back(arg);
     }
 
-    if (options.inputs.empty() && (options.command == Command::Apply || !options.compile_commands_path)) {
-        std::cerr << (options.command == Command::Apply ? "plan.json path is required\n"
-                                                        : "at least one input file, directory, or compile database is required\n");
+    if (options.inputs.empty() &&
+        (options.command == Command::Apply || options.command == Command::Report || options.command == Command::Diff ||
+         !options.compile_commands_path)) {
+        std::cerr << (options.command == Command::Apply || options.command == Command::Report || options.command == Command::Diff
+                          ? "plan.json path is required\n"
+                          : "at least one input file, directory, or compile database is required\n");
         print_usage(std::cerr);
         exit_code = 2;
         return std::nullopt;
     }
-    if (options.command == Command::Apply) return options;
+    if (options.command == Command::Apply || options.command == Command::Report || options.command == Command::Diff) return options;
 
     if (options.target != moult::cpp_modernization::target_name &&
         options.target != moult::cpp_modernization::legacy_target_name) {
@@ -763,6 +1211,8 @@ int main(int argc, char** argv) {
     const CliOptions& cli = *parsed;
 
     if (cli.command == Command::Apply) return apply_plan(cli);
+    if (cli.command == Command::Report) return report_plan(cli);
+    if (cli.command == Command::Diff) return diff_plan(cli);
 
     std::vector<CompileCommandEntry> compile_command_entries;
     if (cli.compile_commands_path) {

@@ -67,6 +67,8 @@ build/moult plan --adapter clang --clang-arg -Iinclude path/to/file.cpp
 build/moult plan --adapter clang --compile-commands build path/to/src
 build/moult plan --compile-commands build --out .moult
 build/moult plan --adapter textual path/to/file.cpp
+build/moult report .moult/plan.json
+build/moult diff .moult/plan.json
 build/moult apply --backup .moult/plan.json
 ```
 
@@ -89,6 +91,16 @@ conflict-checked edits.
 `apply` reads a Moult-generated `plan.json` and applies accepted, conflict-free
 edits to disk. Use `--dry-run` to preview the files that would change, or
 `--backup` to write `<file>.moult.bak` before each file is modified.
+
+`report` reads the same `plan.json` and prints a human-readable summary of
+planned edits, manual-review findings, conflicts, and diagnostics. When the
+referenced source files are still present, report locations include line and
+column numbers as well as byte ranges.
+
+`diff` renders accepted edits as a git-style unified diff and appends
+comment-prefixed manual-review suggestions. Only the accepted-edit portion is a
+patch; manual-review entries are advisory because Moult has not produced safe
+replacement text for them.
 
 Currently supported checks:
 

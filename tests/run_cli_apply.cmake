@@ -26,6 +26,50 @@ if (NOT plan_result EQUAL 0)
 endif()
 
 execute_process(
+    COMMAND "${MOULT_EXE}" report "${OUTPUT_DIR}/plan.json"
+    RESULT_VARIABLE report_result
+    OUTPUT_VARIABLE report_stdout
+    ERROR_VARIABLE report_stderr
+)
+if (NOT report_result EQUAL 0)
+    message(FATAL_ERROR "moult report failed\nstdout:\n${report_stdout}\nstderr:\n${report_stderr}")
+endif()
+if (NOT report_stdout MATCHES "Moult Report")
+    message(FATAL_ERROR "expected report heading")
+endif()
+if (NOT report_stdout MATCHES "Accepted edits: 3")
+    message(FATAL_ERROR "expected accepted edit count in report")
+endif()
+if (NOT report_stdout MATCHES "Manual-review findings: 4")
+    message(FATAL_ERROR "expected manual review count in report")
+endif()
+if (NOT report_stdout MATCHES "modernise.use-nullptr")
+    message(FATAL_ERROR "expected use-nullptr edit in report")
+endif()
+
+execute_process(
+    COMMAND "${MOULT_EXE}" diff "${OUTPUT_DIR}/plan.json"
+    RESULT_VARIABLE diff_result
+    OUTPUT_VARIABLE diff_stdout
+    ERROR_VARIABLE diff_stderr
+)
+if (NOT diff_result EQUAL 0)
+    message(FATAL_ERROR "moult diff failed\nstdout:\n${diff_stdout}\nstderr:\n${diff_stderr}")
+endif()
+if (NOT diff_stdout MATCHES "diff --git")
+    message(FATAL_ERROR "expected git-style diff output")
+endif()
+if (NOT diff_stdout MATCHES "\\+int\\* legacy_pointer\\(\\) noexcept")
+    message(FATAL_ERROR "expected noexcept replacement in diff")
+endif()
+if (NOT diff_stdout MATCHES "# Manual Review Suggestions")
+    message(FATAL_ERROR "expected manual review suggestions in diff output")
+endif()
+if (NOT diff_stdout MATCHES "modernise.replace-auto-ptr")
+    message(FATAL_ERROR "expected auto_ptr manual review suggestion in diff output")
+endif()
+
+execute_process(
     COMMAND "${MOULT_EXE}" apply --backup "${OUTPUT_DIR}/plan.json"
     RESULT_VARIABLE apply_result
     OUTPUT_VARIABLE apply_stdout
