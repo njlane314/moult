@@ -60,6 +60,36 @@ constexpr Opportunity replace_auto_ptr{
     "std::auto_ptr is removed in C++17; migrate ownership semantics to std::unique_ptr.",
     "std::auto_ptr transfer semantics require manual review before an automatic replacement is safe."};
 
+constexpr Opportunity prefer_using_alias{
+    "prefer-using-alias",
+    "typedef",
+    "",
+    core::Confidence::Medium,
+    false,
+    "review typedef alias",
+    "Prefer using aliases over typedef declarations in modern C++.",
+    "typedef declarations often read more clearly as using aliases, but the exact rewrite needs declaration context."};
+
+constexpr Opportunity review_raw_new{
+    "review-raw-new",
+    "new",
+    "",
+    core::Confidence::Medium,
+    false,
+    "review raw new expression",
+    "Review raw new usage for replacement with ownership types or factory helpers.",
+    "Raw allocation can often be replaced with std::make_unique, std::make_shared, or value ownership."};
+
+constexpr Opportunity review_raw_delete{
+    "review-raw-delete",
+    "delete",
+    "",
+    core::Confidence::Medium,
+    false,
+    "review raw delete expression",
+    "Review raw delete usage for replacement with RAII ownership.",
+    "Manual deletion is often a sign that ownership should move to a smart pointer or value type."};
+
 bool is_identifier_char(char c) noexcept {
     const auto uc = static_cast<unsigned char>(c);
     return std::isalnum(uc) || c == '_';
@@ -178,10 +208,28 @@ void scan_source(const core::SourceBuffer& source, core::FactStore& facts) {
             pos += use_noexcept.token.size();
             continue;
         }
+        if (starts_with(text, pos, prefer_using_alias.token) &&
+            has_identifier_boundaries(text, pos, pos + prefer_using_alias.token.size())) {
+            add_opportunity(facts, source.path(), pos, pos + prefer_using_alias.token.size(), prefer_using_alias);
+            pos += prefer_using_alias.token.size();
+            continue;
+        }
         if (starts_with(text, pos, replace_auto_ptr.token) &&
             has_identifier_boundaries(text, pos, pos + replace_auto_ptr.token.size())) {
             add_opportunity(facts, source.path(), pos, pos + replace_auto_ptr.token.size(), replace_auto_ptr);
             pos += replace_auto_ptr.token.size();
+            continue;
+        }
+        if (starts_with(text, pos, review_raw_delete.token) &&
+            has_identifier_boundaries(text, pos, pos + review_raw_delete.token.size())) {
+            add_opportunity(facts, source.path(), pos, pos + review_raw_delete.token.size(), review_raw_delete);
+            pos += review_raw_delete.token.size();
+            continue;
+        }
+        if (starts_with(text, pos, review_raw_new.token) &&
+            has_identifier_boundaries(text, pos, pos + review_raw_new.token.size())) {
+            add_opportunity(facts, source.path(), pos, pos + review_raw_new.token.size(), review_raw_new);
+            pos += review_raw_new.token.size();
             continue;
         }
         if (starts_with(text, pos, use_nullptr.token) &&
@@ -311,6 +359,10 @@ void CppModernizationCapsule::register_rules(core::RuleRegistry& registry) const
     registry.add(std::make_unique<ModernizationRule>("use-noexcept", "modernize.use-noexcept"));
     registry.add(std::make_unique<ModernizationRule>("remove-register", "modernize.remove-register"));
     registry.add(std::make_unique<ModernizationRule>("replace-auto-ptr", "modernize.replace-auto-ptr"));
+    registry.add(std::make_unique<ModernizationRule>("prefer-using-alias", "modernize.prefer-using-alias"));
+    registry.add(std::make_unique<ModernizationRule>("review-raw-new", "modernize.review-raw-new"));
+    registry.add(std::make_unique<ModernizationRule>("review-raw-delete", "modernize.review-raw-delete"));
+    registry.add(std::make_unique<ModernizationRule>("review-c-style-cast", "modernize.review-c-style-cast"));
 }
 
 } // namespace moult::cpp_modernization

@@ -63,7 +63,9 @@ The `moult` CLI includes an initial `cpp-modernization` target:
 build/moult plan --target cpp-modernization path/to/file.cpp
 build/moult plan --target cpp-modernization --out .moult path/to/src
 build/moult plan --adapter clang --clang-arg -Iinclude path/to/file.cpp
+build/moult plan --adapter clang --compile-commands build path/to/src
 build/moult plan --adapter textual path/to/file.cpp
+build/moult apply --backup .moult/plan.json
 ```
 
 When libclang is available at configure time, the CLI builds a Clang-based adapter
@@ -78,6 +80,10 @@ comments and string/character literals, emits modernization opportunity facts,
 and then builds the same reviewable plan with evidence, findings, and
 conflict-checked edits.
 
+`apply` reads a Moult-generated `plan.json` and applies accepted, conflict-free
+edits to disk. Use `--dry-run` to preview the files that would change, or
+`--backup` to write `<file>.moult.bak` before each file is modified.
+
 Currently supported checks:
 
 ```text
@@ -85,6 +91,9 @@ NULL           planned edit to nullptr
 throw()        planned edit to noexcept
 register       planned removal of the obsolete storage-class specifier
 std::auto_ptr  manual-review finding for migration to std::unique_ptr
+typedef        manual-review finding for migration to using aliases
+new/delete     manual-review findings for RAII ownership
+C-style casts  manual-review finding when using the Clang adapter
 ```
 
 `std::auto_ptr` is intentionally reported without an automatic edit because its

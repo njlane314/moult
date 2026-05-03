@@ -50,8 +50,10 @@ enum CXCursorKind {
     CXCursor_CXXMethod = 21,
     CXCursor_Constructor = 24,
     CXCursor_Destructor = 25,
+    CXCursor_TypedefDecl = 20,
     CXCursor_DeclRefExpr = 101,
     CXCursor_CallExpr = 103,
+    CXCursor_CStyleCastExpr = 117,
     CXCursor_CXXStaticCastExpr = 124,
     CXCursor_CXXDynamicCastExpr = 125,
     CXCursor_CXXReinterpretCastExpr = 126,
@@ -192,6 +194,46 @@ constexpr ModernizationOpportunity replace_auto_ptr{
     "review std::auto_ptr usage",
     "std::auto_ptr is removed in C++17; migrate ownership semantics to std::unique_ptr.",
     "Clang found std::auto_ptr text in a declaration type; ownership-transfer semantics require manual review."};
+
+constexpr ModernizationOpportunity prefer_using_alias{
+    "prefer-using-alias",
+    "typedef",
+    "",
+    core::Confidence::Medium,
+    false,
+    "review typedef alias",
+    "Prefer using aliases over typedef declarations in modern C++.",
+    "Clang found a typedef declaration; the exact using-alias rewrite should preserve declarator structure."};
+
+constexpr ModernizationOpportunity review_raw_new{
+    "review-raw-new",
+    "new",
+    "",
+    core::Confidence::Medium,
+    false,
+    "review raw new expression",
+    "Review raw new usage for replacement with ownership types or factory helpers.",
+    "Clang found a raw new expression; RAII ownership may remove manual lifetime management."};
+
+constexpr ModernizationOpportunity review_raw_delete{
+    "review-raw-delete",
+    "delete",
+    "",
+    core::Confidence::Medium,
+    false,
+    "review raw delete expression",
+    "Review raw delete usage for replacement with RAII ownership.",
+    "Clang found a raw delete expression; RAII ownership may remove manual lifetime management."};
+
+constexpr ModernizationOpportunity review_c_style_cast{
+    "review-c-style-cast",
+    "(",
+    "",
+    core::Confidence::Medium,
+    false,
+    "review C-style cast",
+    "Replace C-style casts with the narrowest C++ cast that expresses the intended conversion.",
+    "Clang found a C-style cast, which can hide const, reinterpret, and static conversions behind one syntax."};
 
 class OwnedCxString {
 public:
@@ -448,6 +490,15 @@ enum CXChildVisitResult visit_cursor(CXCursor cursor, CXCursor, CXClientData cli
                 }
                 break;
             }
+            case CXCursor_TypedefDecl: {
+                const std::string spelling = cursor_spelling(cursor);
+                const std::string type = cursor_type_spelling(cursor);
+                if (!spelling.empty()) add_fact(*state->facts, "cxx.typedef", subject, "spelling", spelling, range);
+                if (!type.empty()) add_fact(*state->facts, "cxx.typedef", subject, "type", type, range);
+                const auto typedef_range = find_token_in_range(*state->sources, *range, prefer_using_alias.token);
+                add_opportunity(*state->facts, typedef_range.value_or(*range), prefer_using_alias);
+                break;
+            }
             case CXCursor_VarDecl:
             case CXCursor_ParmDecl:
             case CXCursor_FieldDecl: {
@@ -479,6 +530,10 @@ enum CXChildVisitResult visit_cursor(CXCursor cursor, CXCursor, CXClientData cli
             case CXCursor_InclusionDirective:
                 add_fact(*state->facts, "cxx.include", subject, "spelling", cursor_spelling(cursor), range);
                 break;
+            case CXCursor_CStyleCastExpr:
+                add_fact(*state->facts, "cxx.cast", subject, "kind", "c_style", range);
+                add_opportunity(*state->facts, *range, review_c_style_cast);
+                break;
             case CXCursor_CXXStaticCastExpr:
             case CXCursor_CXXDynamicCastExpr:
             case CXCursor_CXXReinterpretCastExpr:
@@ -488,9 +543,15 @@ enum CXChildVisitResult visit_cursor(CXCursor cursor, CXCursor, CXClientData cli
                 break;
             case CXCursor_CXXNewExpr:
                 add_fact(*state->facts, "cxx.allocation", subject, "operator", "new", range);
+                if (const auto new_range = find_token_in_range(*state->sources, *range, review_raw_new.token)) {
+                    add_opportunity(*state->facts, *new_range, review_raw_new);
+                }
                 break;
             case CXCursor_CXXDeleteExpr:
                 add_fact(*state->facts, "cxx.allocation", subject, "operator", "delete", range);
+                if (const auto delete_range = find_token_in_range(*state->sources, *range, review_raw_delete.token)) {
+                    add_opportunity(*state->facts, *delete_range, review_raw_delete);
+                }
                 break;
             default:
                 break;
@@ -507,6 +568,17 @@ std::vector<const char*> c_args(const std::vector<std::string>& args) {
     return out;
 }
 
+const std::vector<std::string>& args_for_source(std::string_view source_path,
+                                                const ClangCppModernizationAdapter::CompileCommandMap& compile_commands,
+                                                const std::vector<std::string>& fallback_args) {
+    auto exact = compile_commands.find(std::string(source_path));
+    if (exact != compile_commands.end()) return exact->second;
+    for (const auto& [command_path, args] : compile_commands) {
+        if (path_matches(command_path, source_path)) return args;
+    }
+    return fallback_args;
+}
+
 } // namespace
 
 ClangCppModernizationAdapter::ClangCppModernizationAdapter()
@@ -514,6 +586,14 @@ ClangCppModernizationAdapter::ClangCppModernizationAdapter()
 
 ClangCppModernizationAdapter::ClangCppModernizationAdapter(std::vector<std::string> command_line_args)
     : command_line_args_(std::move(command_line_args)) {
+    if (command_line_args_.empty()) {
+        command_line_args_ = {"-x", "c++", "-std=c++14"};
+    }
+}
+
+ClangCppModernizationAdapter::ClangCppModernizationAdapter(std::vector<std::string> fallback_command_line_args,
+                                                           CompileCommandMap compile_commands)
+    : command_line_args_(std::move(fallback_command_line_args)), compile_commands_(std::move(compile_commands)) {
     if (command_line_args_.empty()) {
         command_line_args_ = {"-x", "c++", "-std=c++14"};
     }
@@ -529,8 +609,9 @@ void ClangCppModernizationAdapter::analyze(const core::SourceStore& sources,
         return;
     }
 
-    const auto args = c_args(command_line_args_);
     for (const auto& [path, source] : sources.files()) {
+        const auto& source_args = args_for_source(path, compile_commands_, command_line_args_);
+        const auto args = c_args(source_args);
         CXUnsavedFile unsaved{source.path().c_str(), source.text().c_str(), static_cast<unsigned long>(source.text().size())};
         OwnedTranslationUnit tu(clang_parseTranslationUnit(index.get(),
                                                            path.c_str(),

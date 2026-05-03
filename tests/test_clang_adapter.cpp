@@ -24,6 +24,10 @@ int main() {
                 "int* legacy_pointer() throw() {\n"
                 "    register int value = 0;\n"
                 "    int* pointer = NULL;\n"
+                "    typedef int LegacyInt;\n"
+                "    LegacyInt casted = (int)3.0;\n"
+                "    int* raw = new int;\n"
+                "    delete raw;\n"
                 "    return pointer;\n"
                 "}\n"
                 "void ownership() {\n"
@@ -43,6 +47,10 @@ int main() {
     assert(count_opportunity(result.facts, "use-noexcept") == 1);
     assert(count_opportunity(result.facts, "remove-register") == 1);
     assert(count_opportunity(result.facts, "replace-auto-ptr") == 1);
+    assert(count_opportunity(result.facts, "prefer-using-alias") == 1);
+    assert(count_opportunity(result.facts, "review-c-style-cast") == 1);
+    assert(count_opportunity(result.facts, "review-raw-new") == 1);
+    assert(count_opportunity(result.facts, "review-raw-delete") == 1);
     assert(!result.facts.by_kind("cxx.translation_unit").empty());
     assert(!result.facts.by_kind("cxx.function").empty());
     assert(!result.facts.by_kind("cxx.declaration").empty());
@@ -54,6 +62,10 @@ int main() {
     assert(text.find("nullptr") != std::string::npos);
     assert(text.find("register int value") == std::string::npos);
     assert(text.find("std::auto_ptr<int> owned") != std::string::npos);
+    assert(text.find("typedef int LegacyInt") != std::string::npos);
+    assert(text.find("(int)3.0") != std::string::npos);
+    assert(text.find("new int") != std::string::npos);
+    assert(text.find("delete raw") != std::string::npos);
 
     return 0;
 }

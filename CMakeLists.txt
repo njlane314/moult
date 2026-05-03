@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(moult-core VERSION 0.1.0 LANGUAGES CXX)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL "Export compile_commands.json" FORCE)
+
 option(MOULT_CORE_BUILD_TESTS "Build moult-core tests" ON)
 option(MOULT_CORE_BUILD_EXAMPLES "Build moult-core examples" ON)
 option(MOULT_BUILD_CLI "Build moult command-line tool" ON)
@@ -20,6 +22,25 @@ if (MOULT_BUILD_CLANG_ADAPTER)
         set(MOULT_BUILD_CLANG_ADAPTER OFF)
     endif()
 endif()
+
+if (APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    execute_process(
+        COMMAND xcrun --show-sdk-path
+        OUTPUT_VARIABLE MOULT_APPLE_SDK_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    set(MOULT_APPLE_LIBCXX_INCLUDE "${MOULT_APPLE_SDK_PATH}/usr/include/c++/v1")
+    if (NOT EXISTS "${MOULT_APPLE_LIBCXX_INCLUDE}/cstddef")
+        unset(MOULT_APPLE_LIBCXX_INCLUDE)
+    endif()
+endif()
+
+function(moult_apply_apple_libcxx_workaround target_name)
+    if (MOULT_APPLE_LIBCXX_INCLUDE)
+        target_include_directories(${target_name} SYSTEM BEFORE PRIVATE "${MOULT_APPLE_LIBCXX_INCLUDE}")
+    endif()
+endfunction()
 
 add_library(moult_core STATIC
     src/capsule.cpp
@@ -50,6 +71,7 @@ if (MSVC)
 else()
     target_compile_options(moult_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+moult_apply_apple_libcxx_workaround(moult_core)
 
 add_library(moult_cpp_modernization STATIC
     src/cpp/modernization.cpp
@@ -68,6 +90,7 @@ if (MSVC)
 else()
     target_compile_options(moult_cpp_modernization PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+moult_apply_apple_libcxx_workaround(moult_cpp_modernization)
 
 if (MOULT_BUILD_CLANG_ADAPTER)
     add_library(moult_clang_adapter STATIC
@@ -87,11 +110,13 @@ if (MOULT_BUILD_CLANG_ADAPTER)
     else()
         target_compile_options(moult_clang_adapter PRIVATE -Wall -Wextra -Wpedantic)
     endif()
+    moult_apply_apple_libcxx_workaround(moult_clang_adapter)
 endif()
 
 if (MOULT_BUILD_CLI)
     add_executable(moult apps/moult.cpp)
     target_link_libraries(moult PRIVATE moult::cpp_modernization)
+    moult_apply_apple_libcxx_workaround(moult)
     if (MOULT_BUILD_CLANG_ADAPTER)
         target_compile_definitions(moult PRIVATE MOULT_HAVE_CLANG_ADAPTER=1)
         target_link_libraries(moult PRIVATE moult::clang_adapter)
@@ -102,15 +127,18 @@ if (MOULT_CORE_BUILD_TESTS)
     enable_testing()
     add_executable(moult_core_tests tests/test_core.cpp)
     target_link_libraries(moult_core_tests PRIVATE moult::core)
+    moult_apply_apple_libcxx_workaround(moult_core_tests)
     add_test(NAME moult_core_tests COMMAND moult_core_tests)
 
     add_executable(moult_cpp_modernization_tests tests/test_cpp_modernization.cpp)
     target_link_libraries(moult_cpp_modernization_tests PRIVATE moult::cpp_modernization)
+    moult_apply_apple_libcxx_workaround(moult_cpp_modernization_tests)
     add_test(NAME moult_cpp_modernization_tests COMMAND moult_cpp_modernization_tests)
 
     if (MOULT_BUILD_CLANG_ADAPTER)
         add_executable(moult_clang_adapter_tests tests/test_clang_adapter.cpp)
         target_link_libraries(moult_clang_adapter_tests PRIVATE moult::clang_adapter moult::cpp_modernization)
+        moult_apply_apple_libcxx_workaround(moult_clang_adapter_tests)
         add_test(NAME moult_clang_adapter_tests COMMAND moult_clang_adapter_tests)
     endif()
 
@@ -118,9 +146,23 @@ if (MOULT_CORE_BUILD_TESTS)
         add_test(NAME moult_cli_cpp_modernization
             COMMAND moult plan --include-facts ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernization.cpp
         )
+        add_test(NAME moult_cli_apply
+            COMMAND ${CMAKE_COMMAND}
+                -DMOULT_EXE=$<TARGET_FILE:moult>
+                -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernization.cpp
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/apply-fixture
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cli_apply.cmake
+        )
         if (MOULT_BUILD_CLANG_ADAPTER)
             add_test(NAME moult_cli_clang_cpp_modernization
                 COMMAND moult plan --adapter clang --include-facts ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernization.cpp
+            )
+            add_test(NAME moult_cli_compile_commands
+                COMMAND ${CMAKE_COMMAND}
+                    -DMOULT_EXE=$<TARGET_FILE:moult>
+                    -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernization.cpp
+                    -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/compile-commands-fixture
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_compile_commands.cmake
             )
         endif()
     endif()
@@ -129,6 +171,7 @@ endif()
 if (MOULT_CORE_BUILD_EXAMPLES)
     add_executable(moult_minimal_engine examples/minimal_engine.cpp)
     target_link_libraries(moult_minimal_engine PRIVATE moult::core)
+    moult_apply_apple_libcxx_workaround(moult_minimal_engine)
 endif()
 
 include(GNUInstallDirs)
