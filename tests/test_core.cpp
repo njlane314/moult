@@ -3,6 +3,8 @@
 #include <cassert>
 #include <iostream>
 #include <memory>
+#include <string>
+#include <utility>
 
 using namespace moult::core;
 
@@ -101,10 +103,140 @@ static void test_engine() {
     assert(json.find("test.rename") != std::string::npos);
 }
 
+class RenameTranspiler final : public Transpiler {
+public:
+    std::string id() const override { return "test.transpiler.rename"; }
+    std::string name() const override { return "Test rename transpiler"; }
+    std::string version() const override { return "0.0.1"; }
+
+    void run(const SourceStore& sources, TranspilerSink& sink, DiagnosticSink&, const RunOptions&) const override {
+        const SourceBuffer* source = sources.get("a.c");
+        assert(source);
+        const std::size_t pos = source->text().find("old_api");
+        assert(pos != std::string::npos);
+
+        TranspilerEdit edit;
+        edit.tool = id();
+        edit.rule_id = "test.transpiler.old-api-to-new-api";
+        edit.subject = "site:a.c:old_api";
+        edit.range = SourceRange{"a.c", pos, pos + 7};
+        edit.replacement = "new_api";
+        edit.rationale = "transpiler resolved old_api and rendered new_api";
+        edit.confidence = Confidence::Proven;
+        sink.propose_edit(std::move(edit));
+    }
+};
+
+static void test_transpiler_bridge_accepts_precise_edit() {
+    SourceStore sources;
+    sources.add("a.c", "old_api();\n");
+
+    auto adapter = std::make_shared<TranspilerAdapter>();
+    adapter->add_transpiler(std::make_shared<RenameTranspiler>());
+
+    Engine engine;
+    engine.set_adapter(adapter);
+    engine.add_capsule(std::make_shared<TranspilerCapsule>());
+
+    RunOptions options;
+    options.target = "test";
+    options.minimum_confidence = Confidence::High;
+    auto result = engine.run(sources, options);
+
+    assert(result.facts.by_kind(transpiler_edit_fact_kind).size() == 1);
+    assert(result.plan.accepted_edit_count() == 1);
+    assert(result.plan.findings.empty());
+    assert(result.plan.evidence.size() == 1);
+
+    auto applied = result.plan.edits.apply_to_memory(sources);
+    assert(applied.at("a.c") == "new_api();\n");
+}
+
+class FileRewriteTranspiler final : public Transpiler {
+public:
+    std::string id() const override { return "test.transpiler.file-rewrite"; }
+
+    void run(const SourceStore& sources, TranspilerSink& sink, DiagnosticSink&, const RunOptions&) const override {
+        assert(sources.get("b.txt"));
+        TranspilerFileRewrite rewrite;
+        rewrite.tool = id();
+        rewrite.rule_id = "test.transpiler.rewrite-token";
+        rewrite.file = "b.txt";
+        rewrite.rewritten_text = "alpha BETA gamma\n";
+        rewrite.rationale = "opaque transpiler returned a full rewritten file";
+        rewrite.confidence = Confidence::Proven;
+        sink.propose_file_rewrite(std::move(rewrite));
+    }
+};
+
+static void test_transpiler_bridge_reduces_file_rewrite_to_edit() {
+    SourceStore sources;
+    sources.add("b.txt", "alpha beta gamma\n");
+
+    auto adapter = std::make_shared<TranspilerAdapter>();
+    adapter->add_transpiler(std::make_shared<FileRewriteTranspiler>());
+
+    Engine engine;
+    engine.set_adapter(adapter);
+    engine.add_capsule(std::make_shared<TranspilerCapsule>());
+
+    RunOptions options;
+    options.target = "test";
+    options.minimum_confidence = Confidence::High;
+    auto result = engine.run(sources, options);
+
+    assert(result.plan.accepted_edit_count() == 1);
+    auto applied = result.plan.edits.apply_to_memory(sources);
+    assert(applied.at("b.txt") == "alpha BETA gamma\n");
+}
+
+class LowConfidenceTranspiler final : public Transpiler {
+public:
+    std::string id() const override { return "test.transpiler.low-confidence"; }
+
+    void run(const SourceStore& sources, TranspilerSink& sink, DiagnosticSink&, const RunOptions&) const override {
+        assert(sources.get("c.c"));
+
+        TranspilerEdit edit;
+        edit.tool = id();
+        edit.rule_id = "test.transpiler.review-only";
+        edit.range = SourceRange{"c.c", 0, 3};
+        edit.replacement = "new";
+        edit.rationale = "translator could not prove semantic equivalence";
+        edit.confidence = Confidence::Medium;
+        sink.propose_edit(std::move(edit));
+    }
+};
+
+static void test_transpiler_bridge_demotes_low_confidence_edit() {
+    SourceStore sources;
+    sources.add("c.c", "old();\n");
+
+    auto adapter = std::make_shared<TranspilerAdapter>();
+    adapter->add_transpiler(std::make_shared<LowConfidenceTranspiler>());
+
+    Engine engine;
+    engine.set_adapter(adapter);
+    engine.add_capsule(std::make_shared<TranspilerCapsule>());
+
+    RunOptions options;
+    options.target = "test";
+    options.minimum_confidence = Confidence::High;
+    auto result = engine.run(sources, options);
+
+    assert(result.plan.accepted_edit_count() == 0);
+    assert(result.plan.findings.size() == 1);
+    assert(result.plan.findings.front().rule_id == "test.transpiler.review-only");
+    assert(result.plan.findings.front().message.find("minimum_confidence") != std::string::npos);
+}
+
 int main() {
     test_source_line_columns();
     test_edit_apply();
     test_edit_conflict();
     test_engine();
+    test_transpiler_bridge_accepts_precise_edit();
+    test_transpiler_bridge_reduces_file_rewrite_to_edit();
+    test_transpiler_bridge_demotes_low_confidence_edit();
     std::cout << "moult-core tests passed\n";
 }

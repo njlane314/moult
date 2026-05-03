@@ -28,6 +28,12 @@ build targets if available
 
 The adapter should not decide migration policy. It should expose enough facts for capsules to decide safely.
 
+If you already have a source translator, wrap it with the core `Transpiler`
+interface instead of letting it edit files directly. The translator can emit
+precise `TranspilerEdit` proposals or full `TranspilerFileRewrite` output, and
+`TranspilerCapsule` will promote accepted proposals into the normal Moult plan
+with evidence, guards, confidence checks, and edit conflict detection.
+
 ## 2. Write capsules
 
 A capsule is domain-specific. Examples:

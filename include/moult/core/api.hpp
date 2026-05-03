@@ -10,4 +10,5 @@
 #include "moult/core/plan.hpp"
 #include "moult/core/serializers.hpp"
 #include "moult/core/source.hpp"
+#include "moult/core/transpiler.hpp"
 #include "moult/core/types.hpp"

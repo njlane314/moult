@@ -110,6 +110,7 @@ Do not put everything in the core. Keep these separate:
 Core library       migration data model and deterministic planning
 Language adapter   Clang/Tree-sitter/CodeQL fact emission
 Capsules           domain-specific rules
+Transpiler bridge  source translator proposals converted into guarded plans
 CLI                repo loading, output paths, verification command execution
 Agent layer        LLM-assisted recipe authoring and compiler-error triage
 UI                 reviewer workflow and migration reports

@@ -44,6 +44,7 @@ TextEdit/EditSet  precise byte-range replacements with conflict detection
 Plan              complete migration plan: edits, findings, evidence, groups, diagnostics
 Capsule/Rule      plugin-style migration API
 Engine            adapter + capsule execution host
+TranspilerBridge  wraps external source translators as guarded Moult proposals
 Serializers       plan.json, evidence.jsonl, facts.json, basic SARIF
 ```
 
@@ -64,6 +65,7 @@ build/moult plan --target cpp-modernisation path/to/file.cpp
 build/moult plan --target cpp-modernisation --out .moult path/to/src
 build/moult plan --adapter clang --clang-arg -Iinclude path/to/file.cpp
 build/moult plan --adapter clang --compile-commands build path/to/src
+build/moult plan --compile-commands build --out .moult
 build/moult plan --adapter textual path/to/file.cpp
 build/moult apply --backup .moult/plan.json
 ```
@@ -73,7 +75,11 @@ and uses it by default. The Clang adapter parses each source file, emits semanti
 facts for translation units, functions, declarations, calls, macro expansions, and
 selected C++ constructs, then emits modernisation opportunity facts consumed by
 the shared rule capsule. Extra parser arguments can be passed with repeated
-`--clang-arg` options.
+`--clang-arg` options. `--compile-commands` accepts either a
+`compile_commands.json` file or a build directory containing one. When source
+paths are omitted, Moult uses the translation units listed in the compile
+database as its input set and normalises relative include/source paths against
+each entry's compile directory.
 
 The fallback textual adapter is still available with `--adapter textual`. It skips
 comments and string/character literals, emits modernisation opportunity facts,
@@ -98,6 +104,19 @@ C-style casts  manual-review finding when using the Clang adapter
 
 `std::auto_ptr` is intentionally reported without an automatic edit because its
 ownership-transfer behaviour often requires manual review.
+
+## Transpiler bridge
+
+Moult can now host in-process or external source translators through the core
+`Transpiler` API. A translator reports candidate rewrites to `TranspilerSink`
+instead of mutating files directly. `TranspilerCapsule` then turns those
+proposals into normal Moult evidence, findings, and conflict-checked edits.
+
+This is useful for staged migrations such as Fortran-to-C++ or C-to-Rust, where
+some rewrites can be accepted mechanically but other translated sites need
+manual review. A bridge can submit either precise `TranspilerEdit` ranges or a
+full `TranspilerFileRewrite`; full-file rewrites are reduced to the smallest
+single byte-range edit before they enter the plan.
 
 ## Minimal usage
 
@@ -148,7 +167,7 @@ public:
 
 ## Why this split matters
 
-For C/C++ migration, the Clang layer should be an adapter rather than the whole product. It is responsible for compile-command ingestion, AST traversal, symbol resolution, macro/source-location normalization, and fact emission. The core library remains stable while individual engines evolve.
+For C/C++ migration, the Clang layer should be an adapter rather than the whole product. It is responsible for compile-command ingestion, AST traversal, symbol resolution, macro/source-location normalisation, and fact emission. The core library remains stable while individual engines evolve.
 
 That yields this shape:
 

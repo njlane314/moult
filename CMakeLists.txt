@@ -53,6 +53,7 @@ add_library(moult_core STATIC
     src/plan.cpp
     src/serializers.cpp
     src/source.cpp
+    src/transpiler.cpp
     src/types.cpp
 )
 
@@ -152,6 +153,13 @@ if (MOULT_CORE_BUILD_TESTS)
                 -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernisation.cpp
                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/apply-fixture
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cli_apply.cmake
+        )
+        add_test(NAME moult_cli_textual_compile_commands
+            COMMAND ${CMAKE_COMMAND}
+                -DMOULT_EXE=$<TARGET_FILE:moult>
+                -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernisation.cpp
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/textual-compile-commands-fixture
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_textual_compile_commands.cmake
         )
         if (MOULT_BUILD_CLANG_ADAPTER)
             add_test(NAME moult_cli_clang_cpp_modernisation

@@ -43,8 +43,14 @@ struct CliOptions {
     std::vector<std::filesystem::path> inputs;
 };
 
+struct CompileCommandEntry {
+    std::filesystem::path source_file;
+    std::filesystem::path directory;
+    std::vector<std::string> args;
+};
+
 void print_usage(std::ostream& out) {
-    out << "usage: moult <scan|plan> [options] <file-or-directory>...\n"
+    out << "usage: moult <scan|plan> [options] [file-or-directory]...\n"
         << "       moult apply [options] <plan.json>\n"
         << "\n"
         << "options:\n"
@@ -56,7 +62,7 @@ void print_usage(std::ostream& out) {
         << " (default: textual; clang not built)\n"
 #endif
         << "  --clang-arg <arg>            extra argument for libclang; repeat as needed\n"
-        << "  --compile-commands <path>    compile_commands.json path or build directory\n"
+        << "  --compile-commands <path>    compile_commands.json path or build directory; used as input if no paths are given\n"
         << "  --out <directory>            write plan.json, facts.json, evidence.jsonl, findings.sarif\n"
         << "  --min-confidence <level>     low, medium, high, or proven (default: high)\n"
         << "  --include-facts              include facts inside plan.json/stdout JSON\n"
@@ -331,7 +337,44 @@ bool same_path_loose(const std::filesystem::path& a, const std::filesystem::path
     return ca == cb;
 }
 
-std::vector<std::string> sanitize_compile_command(std::vector<std::string> args, const std::filesystem::path& source_file) {
+std::filesystem::path absolute_from_directory(const std::filesystem::path& path, const std::filesystem::path& directory) {
+    if (path.empty() || path.is_absolute() || directory.empty()) return path;
+    return directory / path;
+}
+
+bool is_compile_source_argument(const std::string& arg,
+                                const std::filesystem::path& source_file,
+                                const std::filesystem::path& directory) {
+    if (arg.empty() || arg[0] == '-') return false;
+    const std::filesystem::path argument_path = arg;
+    if (same_path_loose(argument_path, source_file)) return true;
+    if (!directory.empty() && same_path_loose(absolute_from_directory(argument_path, directory), source_file)) return true;
+    return false;
+}
+
+std::string absolute_joined_path_argument(std::string_view prefix,
+                                          const std::string& arg,
+                                          const std::filesystem::path& directory) {
+    if (directory.empty() || arg.size() <= prefix.size()) return arg;
+    const std::filesystem::path path(arg.substr(prefix.size()));
+    if (path.is_absolute()) return arg;
+    return std::string(prefix) + (directory / path).string();
+}
+
+std::string absolute_separate_path_argument(const std::string& arg, const std::filesystem::path& directory) {
+    if (directory.empty()) return arg;
+    const std::filesystem::path path(arg);
+    return path.is_absolute() ? arg : (directory / path).string();
+}
+
+bool option_has_separate_path_argument(std::string_view arg) {
+    return arg == "-I" || arg == "-isystem" || arg == "-iquote" || arg == "-idirafter" || arg == "-include" ||
+           arg == "-imacros" || arg == "-F" || arg == "-iframework" || arg == "-isysroot";
+}
+
+std::vector<std::string> sanitize_compile_command(std::vector<std::string> args,
+                                                  const std::filesystem::path& source_file,
+                                                  const std::filesystem::path& directory) {
     std::vector<std::string> out;
     if (args.empty()) return out;
     for (std::size_t i = 1; i < args.size(); ++i) {
@@ -342,30 +385,47 @@ std::vector<std::string> sanitize_compile_command(std::vector<std::string> args,
             continue;
         }
         if (arg.rfind("-o", 0) == 0 && arg.size() > 2) continue;
-        if (same_path_loose(std::filesystem::path(arg), source_file)) continue;
+        if (is_compile_source_argument(arg, source_file, directory)) continue;
+        if (option_has_separate_path_argument(arg) && i + 1 < args.size()) {
+            out.push_back(arg);
+            out.push_back(absolute_separate_path_argument(args[++i], directory));
+            continue;
+        }
+        if (arg.rfind("-I", 0) == 0 && arg.size() > 2) {
+            out.push_back(absolute_joined_path_argument("-I", arg, directory));
+            continue;
+        }
+        if (arg.rfind("-F", 0) == 0 && arg.size() > 2) {
+            out.push_back(absolute_joined_path_argument("-F", arg, directory));
+            continue;
+        }
+        if (arg.rfind("--sysroot=", 0) == 0) {
+            out.push_back(absolute_joined_path_argument("--sysroot=", arg, directory));
+            continue;
+        }
         out.push_back(arg);
     }
     return out;
 }
 
-#ifdef MOULT_HAVE_CLANG_ADAPTER
-moult::clang_adapter::ClangCppModernizationAdapter::CompileCommandMap parse_compile_commands_file(
-    const std::filesystem::path& path) {
+std::vector<CompileCommandEntry> parse_compile_commands_file(const std::filesystem::path& path) {
     std::string text;
     if (!read_text_file(path, text)) throw std::runtime_error("failed to read compile commands: " + path.string());
     JsonValue root = JsonParser(text).parse();
     if (root.type != JsonValue::Type::Array) throw std::runtime_error("compile_commands.json must be an array");
 
-    moult::clang_adapter::ClangCppModernizationAdapter::CompileCommandMap out;
+    const std::filesystem::path database_directory = path.parent_path().empty() ? std::filesystem::path(".") : path.parent_path();
+    std::vector<CompileCommandEntry> out;
     for (const JsonValue& entry : root.array) {
         if (entry.type != JsonValue::Type::Object) continue;
         const std::string directory = optional_object_field(entry, "directory") &&
                                               optional_object_field(entry, "directory")->type == JsonValue::Type::String
                                           ? optional_object_field(entry, "directory")->string
                                           : std::string();
+        std::filesystem::path command_directory = directory.empty() ? database_directory : std::filesystem::path(directory);
+        if (!command_directory.is_absolute()) command_directory = database_directory / command_directory;
         const std::filesystem::path file_field = json_string_field(entry, "file");
-        const std::filesystem::path source_file =
-            file_field.is_absolute() ? file_field : std::filesystem::path(directory) / file_field;
+        const std::filesystem::path source_file = file_field.is_absolute() ? file_field : command_directory / file_field;
 
         std::vector<std::string> args;
         if (const JsonValue* arguments = optional_object_field(entry, "arguments")) {
@@ -381,7 +441,27 @@ moult::clang_adapter::ClangCppModernizationAdapter::CompileCommandMap parse_comp
             continue;
         }
 
-        out[source_file.string()] = sanitize_compile_command(std::move(args), source_file);
+        out.push_back(CompileCommandEntry{
+            source_file,
+            command_directory,
+            sanitize_compile_command(std::move(args), source_file, command_directory)});
+    }
+    return out;
+}
+
+std::vector<std::filesystem::path> source_files_from_compile_commands(const std::vector<CompileCommandEntry>& entries) {
+    std::vector<std::filesystem::path> out;
+    out.reserve(entries.size());
+    for (const auto& entry : entries) out.push_back(entry.source_file);
+    return out;
+}
+
+#ifdef MOULT_HAVE_CLANG_ADAPTER
+moult::clang_adapter::ClangCppModernizationAdapter::CompileCommandMap compile_command_map_from_entries(
+    const std::vector<CompileCommandEntry>& entries) {
+    moult::clang_adapter::ClangCppModernizationAdapter::CompileCommandMap out;
+    for (const auto& entry : entries) {
+        out[entry.source_file.string()] = entry.args;
     }
     return out;
 }
@@ -409,8 +489,8 @@ std::optional<std::filesystem::path> find_compile_commands(const std::vector<std
     std::set<std::filesystem::path> seen;
     for (const auto& candidate : candidates) {
         std::error_code ec;
-        const auto normalized = std::filesystem::weakly_canonical(candidate, ec);
-        const auto key = ec ? candidate : normalized;
+        const auto normalised = std::filesystem::weakly_canonical(candidate, ec);
+        const auto key = ec ? candidate : normalised;
         if (!seen.insert(key).second) continue;
         if (std::filesystem::is_regular_file(candidate, ec)) return candidate;
     }
@@ -640,9 +720,9 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
         options.inputs.emplace_back(arg);
     }
 
-    if (options.inputs.empty()) {
+    if (options.inputs.empty() && (options.command == Command::Apply || !options.compile_commands_path)) {
         std::cerr << (options.command == Command::Apply ? "plan.json path is required\n"
-                                                        : "at least one input file or directory is required\n");
+                                                        : "at least one input file, directory, or compile database is required\n");
         print_usage(std::cerr);
         exit_code = 2;
         return std::nullopt;
@@ -684,11 +764,25 @@ int main(int argc, char** argv) {
 
     if (cli.command == Command::Apply) return apply_plan(cli);
 
-    std::vector<std::filesystem::path> files;
-    for (const auto& input : cli.inputs) {
-        if (!collect_input_files(input, files)) {
-            std::cerr << "failed to read input path: " << input << "\n";
+    std::vector<CompileCommandEntry> compile_command_entries;
+    if (cli.compile_commands_path) {
+        try {
+            compile_command_entries = parse_compile_commands_file(*cli.compile_commands_path);
+        } catch (const std::exception& ex) {
+            std::cerr << ex.what() << "\n";
             return 1;
+        }
+    }
+
+    std::vector<std::filesystem::path> files;
+    if (cli.inputs.empty()) {
+        files = source_files_from_compile_commands(compile_command_entries);
+    } else {
+        for (const auto& input : cli.inputs) {
+            if (!collect_input_files(input, files)) {
+                std::cerr << "failed to read input path: " << input << "\n";
+                return 1;
+            }
         }
     }
     std::sort(files.begin(), files.end());
@@ -714,15 +808,23 @@ int main(int argc, char** argv) {
     else {
         std::vector<std::string> clang_args{"-x", "c++", "-std=c++14"};
         clang_args.insert(clang_args.end(), cli.clang_args.begin(), cli.clang_args.end());
-        moult::clang_adapter::ClangCppModernizationAdapter::CompileCommandMap compile_commands;
-        const auto compile_commands_path = cli.compile_commands_path ? cli.compile_commands_path : find_compile_commands(cli.inputs);
-        if (compile_commands_path) {
-            try {
-                compile_commands = parse_compile_commands_file(*compile_commands_path);
-            } catch (const std::exception& ex) {
-                std::cerr << ex.what() << "\n";
-                return 1;
+        if (!cli.compile_commands_path) {
+            const auto compile_commands_path = find_compile_commands(cli.inputs);
+            if (compile_commands_path) {
+                try {
+                    compile_command_entries = parse_compile_commands_file(*compile_commands_path);
+                } catch (const std::exception& ex) {
+                    std::cerr << ex.what() << "\n";
+                    return 1;
+                }
             }
+        }
+        moult::clang_adapter::ClangCppModernizationAdapter::CompileCommandMap compile_commands;
+        try {
+            compile_commands = compile_command_map_from_entries(compile_command_entries);
+        } catch (const std::exception& ex) {
+            std::cerr << ex.what() << "\n";
+            return 1;
         }
         engine.set_adapter(std::make_shared<moult::clang_adapter::ClangCppModernizationAdapter>(
             std::move(clang_args), std::move(compile_commands)));
