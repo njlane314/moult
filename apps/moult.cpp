@@ -48,7 +48,7 @@ void print_usage(std::ostream& out) {
         << "       moult apply [options] <plan.json>\n"
         << "\n"
         << "options:\n"
-        << "  --target <name>              target to run (default: cpp-modernization)\n"
+        << "  --target <name>              target to run (default: cpp-modernisation)\n"
         << "  --adapter <name>             textual or clang"
 #ifdef MOULT_HAVE_CLANG_ADAPTER
         << " (default: clang)\n"
@@ -649,10 +649,14 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
     }
     if (options.command == Command::Apply) return options;
 
-    if (options.target != moult::cpp_modernization::target_name) {
+    if (options.target != moult::cpp_modernization::target_name &&
+        options.target != moult::cpp_modernization::legacy_target_name) {
         std::cerr << "unsupported target: " << options.target << "\n";
         exit_code = 2;
         return std::nullopt;
+    }
+    if (options.target == moult::cpp_modernization::legacy_target_name) {
+        options.target = std::string(moult::cpp_modernization::target_name);
     }
     if (options.adapter != "textual" && options.adapter != "clang") {
         std::cerr << "unsupported adapter: " << options.adapter << "\n";

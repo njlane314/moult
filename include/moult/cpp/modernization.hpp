@@ -8,7 +8,8 @@
 
 namespace moult::cpp_modernization {
 
-inline constexpr std::string_view target_name = "cpp-modernization";
+inline constexpr std::string_view target_name = "cpp-modernisation";
+inline constexpr std::string_view legacy_target_name = "cpp-modernization";
 
 class TextualCppModernizationAdapter final : public core::SemanticAdapter {
 public:

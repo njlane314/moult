@@ -8,7 +8,7 @@ The intended architecture is:
 
 ```text
 language/build adapter
-  Clang, CodeQL export, tree-sitter, proprietary analyzer
+  Clang, CodeQL export, tree-sitter, proprietary analyser
         ↓ emits
 FactStore
         ↓ consumed by
@@ -55,13 +55,13 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-## C++ modernization helper
+## C++ modernisation helper
 
-The `moult` CLI includes an initial `cpp-modernization` target:
+The `moult` CLI includes an initial `cpp-modernisation` target:
 
 ```bash
-build/moult plan --target cpp-modernization path/to/file.cpp
-build/moult plan --target cpp-modernization --out .moult path/to/src
+build/moult plan --target cpp-modernisation path/to/file.cpp
+build/moult plan --target cpp-modernisation --out .moult path/to/src
 build/moult plan --adapter clang --clang-arg -Iinclude path/to/file.cpp
 build/moult plan --adapter clang --compile-commands build path/to/src
 build/moult plan --adapter textual path/to/file.cpp
@@ -71,12 +71,12 @@ build/moult apply --backup .moult/plan.json
 When libclang is available at configure time, the CLI builds a Clang-based adapter
 and uses it by default. The Clang adapter parses each source file, emits semantic
 facts for translation units, functions, declarations, calls, macro expansions, and
-selected C++ constructs, then emits modernization opportunity facts consumed by
+selected C++ constructs, then emits modernisation opportunity facts consumed by
 the shared rule capsule. Extra parser arguments can be passed with repeated
 `--clang-arg` options.
 
 The fallback textual adapter is still available with `--adapter textual`. It skips
-comments and string/character literals, emits modernization opportunity facts,
+comments and string/character literals, emits modernisation opportunity facts,
 and then builds the same reviewable plan with evidence, findings, and
 conflict-checked edits.
 
@@ -97,7 +97,7 @@ C-style casts  manual-review finding when using the Clang adapter
 ```
 
 `std::auto_ptr` is intentionally reported without an automatic edit because its
-ownership-transfer behavior often requires manual review.
+ownership-transfer behaviour often requires manual review.
 
 ## Minimal usage
 

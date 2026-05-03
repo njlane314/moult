@@ -12,7 +12,7 @@ file(REMOVE_RECURSE "${WORK_DIR}")
 file(MAKE_DIRECTORY "${WORK_DIR}")
 file(COPY "${FIXTURE}" DESTINATION "${WORK_DIR}")
 
-set(INPUT "${WORK_DIR}/legacy_modernization.cpp")
+set(INPUT "${WORK_DIR}/legacy_modernisation.cpp")
 file(WRITE "${WORK_DIR}/compile_commands.json"
 "[
   {

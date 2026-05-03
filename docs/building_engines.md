@@ -11,7 +11,7 @@ moult-cli               repository loading, output, verification, Git integratio
 
 ## 1. Write an adapter
 
-The adapter depends on the parser/analyzer and emits facts.
+The adapter depends on the parser/analyser and emits facts.
 
 For a C/C++ Clang adapter, the first implementation should emit facts for:
 

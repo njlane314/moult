@@ -130,10 +130,10 @@ if (MOULT_CORE_BUILD_TESTS)
     moult_apply_apple_libcxx_workaround(moult_core_tests)
     add_test(NAME moult_core_tests COMMAND moult_core_tests)
 
-    add_executable(moult_cpp_modernization_tests tests/test_cpp_modernization.cpp)
-    target_link_libraries(moult_cpp_modernization_tests PRIVATE moult::cpp_modernization)
-    moult_apply_apple_libcxx_workaround(moult_cpp_modernization_tests)
-    add_test(NAME moult_cpp_modernization_tests COMMAND moult_cpp_modernization_tests)
+    add_executable(moult_cpp_modernisation_tests tests/test_cpp_modernisation.cpp)
+    target_link_libraries(moult_cpp_modernisation_tests PRIVATE moult::cpp_modernization)
+    moult_apply_apple_libcxx_workaround(moult_cpp_modernisation_tests)
+    add_test(NAME moult_cpp_modernisation_tests COMMAND moult_cpp_modernisation_tests)
 
     if (MOULT_BUILD_CLANG_ADAPTER)
         add_executable(moult_clang_adapter_tests tests/test_clang_adapter.cpp)
@@ -143,24 +143,24 @@ if (MOULT_CORE_BUILD_TESTS)
     endif()
 
     if (MOULT_BUILD_CLI)
-        add_test(NAME moult_cli_cpp_modernization
-            COMMAND moult plan --include-facts ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernization.cpp
+        add_test(NAME moult_cli_cpp_modernisation
+            COMMAND moult plan --include-facts ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernisation.cpp
         )
         add_test(NAME moult_cli_apply
             COMMAND ${CMAKE_COMMAND}
                 -DMOULT_EXE=$<TARGET_FILE:moult>
-                -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernization.cpp
+                -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernisation.cpp
                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/apply-fixture
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cli_apply.cmake
         )
         if (MOULT_BUILD_CLANG_ADAPTER)
-            add_test(NAME moult_cli_clang_cpp_modernization
-                COMMAND moult plan --adapter clang --include-facts ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernization.cpp
+            add_test(NAME moult_cli_clang_cpp_modernisation
+                COMMAND moult plan --adapter clang --include-facts ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernisation.cpp
             )
             add_test(NAME moult_cli_compile_commands
                 COMMAND ${CMAKE_COMMAND}
                     -DMOULT_EXE=$<TARGET_FILE:moult>
-                    -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernization.cpp
+                    -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/legacy_modernisation.cpp
                     -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/compile-commands-fixture
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_compile_commands.cmake
             )

@@ -12,7 +12,7 @@ using namespace moult::cpp_modernization;
 
 static std::size_t count_opportunity(const FactStore& facts, std::string_view object) {
     return facts.where([&](const Fact& fact) {
-        return fact.kind == "cpp.modernization.opportunity" && fact.object == object;
+        return fact.kind == "cpp.modernisation.opportunity" && fact.object == object;
     }).size();
 }
 

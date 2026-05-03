@@ -378,7 +378,7 @@ void add_opportunity(core::FactStore& facts,
         {"edit_capable", opportunity.edit_capable ? "true" : "false"},
         {"scanner", "libclang"}};
 
-    facts.add("cpp.modernization.opportunity",
+    facts.add("cpp.modernisation.opportunity",
               subject_for(range),
               "opportunity",
               std::string(opportunity.kind),

@@ -11,7 +11,7 @@ class SemanticAdapter {
 public:
     virtual ~SemanticAdapter() = default;
 
-    // A Clang adapter, tree-sitter adapter, build-system scanner, or proprietary analyzer
+    // A Clang adapter, tree-sitter adapter, build-system scanner, or proprietary analyser
     // populates facts here. The core deliberately does not know parser-specific classes.
     virtual void analyze(const SourceStore& sources,
                          FactStore& facts,

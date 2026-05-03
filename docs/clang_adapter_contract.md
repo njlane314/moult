@@ -48,7 +48,7 @@ The adapter should normalize source locations before constructing `SourceRange`:
 4. Emit manual-review findings for ambiguous macro-origin sites.
 ```
 
-## Rule behavior
+## Rule behaviour
 
 A capsule rule should not inspect Clang AST classes directly. It should inspect facts.
 

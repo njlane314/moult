@@ -105,6 +105,16 @@ bool starts_with(std::string_view text, std::size_t pos, std::string_view token)
     return pos <= text.size() && token.size() <= text.size() - pos && text.substr(pos, token.size()) == token;
 }
 
+bool is_preprocessor_directive_start(std::string_view text, std::size_t pos) noexcept {
+    if (pos >= text.size() || text[pos] != '#') return false;
+    const std::size_t line_start = text.rfind('\n', pos);
+    const std::size_t begin = line_start == std::string_view::npos ? 0 : line_start + 1;
+    for (std::size_t i = begin; i < pos; ++i) {
+        if (text[i] != ' ' && text[i] != '\t') return false;
+    }
+    return true;
+}
+
 std::string confidence_string(core::Confidence confidence) {
     return core::to_string(confidence);
 }
@@ -142,9 +152,9 @@ void add_opportunity(core::FactStore& facts,
         {"rationale", std::string(opportunity.rationale)},
         {"confidence", confidence_string(opportunity.confidence)},
         {"edit_capable", opportunity.edit_capable ? "true" : "false"},
-        {"scanner", "textual-cpp-modernization"}};
+        {"scanner", "textual-cpp-modernisation"}};
 
-    facts.add("cpp.modernization.opportunity",
+    facts.add("cpp.modernisation.opportunity",
               "site:" + std::string(path) + ":" + std::to_string(begin),
               "opportunity",
               std::string(opportunity.kind),
@@ -180,6 +190,11 @@ void scan_source(const core::SourceBuffer& source, core::FactStore& facts) {
     const std::string_view text = source.text();
     std::size_t pos = 0;
     while (pos < text.size()) {
+        if (is_preprocessor_directive_start(text, pos)) {
+            const std::size_t end = text.find('\n', pos + 1);
+            pos = end == std::string_view::npos ? text.size() : end + 1;
+            continue;
+        }
         if (starts_with(text, pos, "//")) {
             const std::size_t end = text.find('\n', pos + 2);
             pos = end == std::string_view::npos ? text.size() : end + 1;
@@ -256,13 +271,13 @@ public:
     ModernizationRule(std::string kind, std::string id) : kind_(std::move(kind)), id_(std::move(id)) {}
 
     [[nodiscard]] std::string id() const override { return id_; }
-    [[nodiscard]] std::string summary() const override { return "Report C++ modernization opportunity: " + kind_; }
+    [[nodiscard]] std::string summary() const override { return "Report C++ modernisation opportunity: " + kind_; }
     [[nodiscard]] std::vector<std::string> targets() const override { return {std::string(target_name)}; }
 
     void run(core::RuleContext& ctx) const override {
         for (const core::Fact* fact : ctx.facts().where([&](const core::Fact& f) {
-                 return f.kind == "cpp.modernization.opportunity" && f.predicate == "opportunity" &&
-                        f.object == kind_;
+                 return (f.kind == "cpp.modernisation.opportunity" || f.kind == "cpp.modernization.opportunity") &&
+                        f.predicate == "opportunity" && f.object == kind_;
              })) {
             const auto confidence = parse_confidence(fact->attributes).value_or(core::Confidence::Medium);
             const auto token = attr_or(fact->attributes, "token");
@@ -273,7 +288,7 @@ public:
                                   fact->range ? core::GuardStatus::Passed : core::GuardStatus::Failed,
                                   "",
                                   {}},
-                core::GuardResult{attr_or(fact->attributes, "scanner", "modernization_scan"),
+                core::GuardResult{attr_or(fact->attributes, "scanner", "modernisation_scan"),
                                   core::GuardStatus::Passed,
                                   "",
                                   {}}};
@@ -297,7 +312,7 @@ public:
 
             core::Finding finding;
             finding.rule_id = id_;
-            finding.title = attr_or(fact->attributes, "title", "C++ modernization opportunity");
+            finding.title = attr_or(fact->attributes, "title", "C++ modernisation opportunity");
             finding.message = attr_or(fact->attributes, "message");
             finding.severity = confidence == core::Confidence::Medium ? core::Severity::Warning : core::Severity::Note;
             finding.confidence = confidence;
@@ -339,11 +354,11 @@ void TextualCppModernizationAdapter::analyze(const core::SourceStore& sources,
 }
 
 std::string CppModernizationCapsule::id() const {
-    return "moult.cpp-modernization";
+    return "moult.cpp-modernisation";
 }
 
 std::string CppModernizationCapsule::name() const {
-    return "C++ Modernization";
+    return "C++ Modernisation";
 }
 
 std::string CppModernizationCapsule::version() const {
@@ -351,18 +366,18 @@ std::string CppModernizationCapsule::version() const {
 }
 
 std::vector<std::string> CppModernizationCapsule::targets() const {
-    return {std::string(target_name)};
+    return {std::string(target_name), std::string(legacy_target_name)};
 }
 
 void CppModernizationCapsule::register_rules(core::RuleRegistry& registry) const {
-    registry.add(std::make_unique<ModernizationRule>("use-nullptr", "modernize.use-nullptr"));
-    registry.add(std::make_unique<ModernizationRule>("use-noexcept", "modernize.use-noexcept"));
-    registry.add(std::make_unique<ModernizationRule>("remove-register", "modernize.remove-register"));
-    registry.add(std::make_unique<ModernizationRule>("replace-auto-ptr", "modernize.replace-auto-ptr"));
-    registry.add(std::make_unique<ModernizationRule>("prefer-using-alias", "modernize.prefer-using-alias"));
-    registry.add(std::make_unique<ModernizationRule>("review-raw-new", "modernize.review-raw-new"));
-    registry.add(std::make_unique<ModernizationRule>("review-raw-delete", "modernize.review-raw-delete"));
-    registry.add(std::make_unique<ModernizationRule>("review-c-style-cast", "modernize.review-c-style-cast"));
+    registry.add(std::make_unique<ModernizationRule>("use-nullptr", "modernise.use-nullptr"));
+    registry.add(std::make_unique<ModernizationRule>("use-noexcept", "modernise.use-noexcept"));
+    registry.add(std::make_unique<ModernizationRule>("remove-register", "modernise.remove-register"));
+    registry.add(std::make_unique<ModernizationRule>("replace-auto-ptr", "modernise.replace-auto-ptr"));
+    registry.add(std::make_unique<ModernizationRule>("prefer-using-alias", "modernise.prefer-using-alias"));
+    registry.add(std::make_unique<ModernizationRule>("review-raw-new", "modernise.review-raw-new"));
+    registry.add(std::make_unique<ModernizationRule>("review-raw-delete", "modernise.review-raw-delete"));
+    registry.add(std::make_unique<ModernizationRule>("review-c-style-cast", "modernise.review-c-style-cast"));
 }
 
 } // namespace moult::cpp_modernization
