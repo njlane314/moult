@@ -72,6 +72,7 @@ build/moult plan --adapter textual path/to/file.cpp
 build/moult report .moult/plan.json
 build/moult report --summary-only --limit 20 .moult/plan.json
 build/moult report --rule 'modernise.use-nullptr' --file 'src/util/**' .moult/plan.json
+build/moult slice --rule 'modernise.use-nullptr' --file 'src/util/**' --out util-nullptr.plan.json .moult/plan.json
 build/moult diff .moult/plan.json
 build/moult review .moult
 build/moult apply --backup .moult/plan.json
@@ -114,6 +115,12 @@ scoping, or applying the plan. Use `--summary-only` for large repositories,
 `--limit <count>` to control grouped summary length, and repeated `--rule` or
 `--file` globs to focus the report on a subsystem or migration rule.
 
+`slice` makes report filtering actionable by writing a new focused `plan.json`
+from an existing plan. The sliced plan preserves plan metadata, keeps only
+matching edits, findings, conflicts, and diagnostics, and prunes unreferenced
+evidence and facts. Use it before `diff`, `review`, or `apply` when you want to
+migrate one rule or subsystem at a time.
+
 `diff` renders accepted edits as a git-style unified diff and appends
 comment-prefixed manual-review suggestions. Only the accepted-edit portion is a
 patch; manual-review entries are advisory because Moult has not produced safe
@@ -143,7 +150,7 @@ register       planned removal of the obsolete storage-class specifier
 std::auto_ptr  manual-review finding for migration to std::unique_ptr
 typedef        manual-review finding for migration to using aliases
 new/delete     manual-review findings for RAII ownership
-C-style casts  manual-review finding when using the Clang adapter
+C-style casts  manual-review finding for replacement with named C++ casts
 ```
 
 `std::auto_ptr` is intentionally reported without an automatic edit because its

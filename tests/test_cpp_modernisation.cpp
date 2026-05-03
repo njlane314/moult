@@ -16,6 +16,7 @@ int main() {
                 "  int* p = NULL;\n"
                 "  std::auto_ptr<int> owned;\n"
                 "  typedef int LegacyInt;\n"
+                "  LegacyInt casted = (int)3.0;\n"
                 "  int* raw = new int;\n"
                 "  delete raw;\n"
                 "  const char* s = \"NULL throw() register std::auto_ptr\";\n"
@@ -48,8 +49,8 @@ int main() {
     options.minimum_confidence = Confidence::High;
 
     auto result = engine.run(sources, options);
-    assert(result.facts.all().size() == 7);
-    assert(result.plan.findings.size() == 7);
+    assert(result.facts.all().size() == 8);
+    assert(result.plan.findings.size() == 8);
     assert(result.plan.accepted_edit_count() == 3);
     assert(!result.plan.has_errors());
 
@@ -60,6 +61,7 @@ int main() {
     assert(text.find("register int value") == std::string::npos);
     assert(text.find("std::auto_ptr<int> owned") != std::string::npos);
     assert(text.find("typedef int LegacyInt") != std::string::npos);
+    assert(text.find("(int)3.0") != std::string::npos);
     assert(text.find("new int") != std::string::npos);
     assert(text.find("delete raw") != std::string::npos);
     assert(text.find("\"NULL throw() register std::auto_ptr\"") != std::string::npos);

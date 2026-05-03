@@ -91,7 +91,7 @@ endif()
 if (NOT report_stdout MATCHES "Accepted edits: 3")
     message(FATAL_ERROR "expected accepted edit count in report")
 endif()
-if (NOT report_stdout MATCHES "Manual-review findings: 4")
+if (NOT report_stdout MATCHES "Manual-review findings: 5")
     message(FATAL_ERROR "expected manual review count in report")
 endif()
 if (NOT report_stdout MATCHES "modernise.use-nullptr")
@@ -127,6 +127,65 @@ if (filtered_report_stdout MATCHES "Planned Edits")
 endif()
 if (filtered_report_stdout MATCHES "modernise.use-noexcept")
     message(FATAL_ERROR "rule-filtered report should not include other rules\nstdout:\n${filtered_report_stdout}")
+endif()
+
+set(SLICED_PLAN "${OUTPUT_DIR}/nullptr.plan.json")
+execute_process(
+    COMMAND "${MOULT_EXE}" slice --rule "modernise.use-nullptr" --file "legacy_modernisation.cpp" --out "${SLICED_PLAN}" "${OUTPUT_DIR}/plan.json"
+    RESULT_VARIABLE slice_result
+    OUTPUT_VARIABLE slice_stdout
+    ERROR_VARIABLE slice_stderr
+)
+if (NOT slice_result EQUAL 0)
+    message(FATAL_ERROR "moult slice failed\nstdout:\n${slice_stdout}\nstderr:\n${slice_stderr}")
+endif()
+if (NOT slice_stdout MATCHES "accepted edits: 1")
+    message(FATAL_ERROR "expected sliced plan to include one edit\nstdout:\n${slice_stdout}")
+endif()
+
+execute_process(
+    COMMAND "${MOULT_EXE}" report "${SLICED_PLAN}"
+    RESULT_VARIABLE sliced_report_result
+    OUTPUT_VARIABLE sliced_report_stdout
+    ERROR_VARIABLE sliced_report_stderr
+)
+if (NOT sliced_report_result EQUAL 0)
+    message(FATAL_ERROR "moult sliced report failed\nstdout:\n${sliced_report_stdout}\nstderr:\n${sliced_report_stderr}")
+endif()
+if (NOT sliced_report_stdout MATCHES "Accepted edits: 1")
+    message(FATAL_ERROR "expected sliced report to include one accepted edit\nstdout:\n${sliced_report_stdout}")
+endif()
+if (sliced_report_stdout MATCHES "modernise.use-noexcept")
+    message(FATAL_ERROR "sliced report should not include rules outside the slice\nstdout:\n${sliced_report_stdout}")
+endif()
+
+execute_process(
+    COMMAND "${MOULT_EXE}" diff "${SLICED_PLAN}"
+    RESULT_VARIABLE sliced_diff_result
+    OUTPUT_VARIABLE sliced_diff_stdout
+    ERROR_VARIABLE sliced_diff_stderr
+)
+if (NOT sliced_diff_result EQUAL 0)
+    message(FATAL_ERROR "moult sliced diff failed\nstdout:\n${sliced_diff_stdout}\nstderr:\n${sliced_diff_stderr}")
+endif()
+if (NOT sliced_diff_stdout MATCHES "\\+    int\\* pointer = nullptr;")
+    message(FATAL_ERROR "expected sliced diff to include nullptr edit\nstdout:\n${sliced_diff_stdout}")
+endif()
+if (sliced_diff_stdout MATCHES "noexcept")
+    message(FATAL_ERROR "sliced diff should not include noexcept edit\nstdout:\n${sliced_diff_stdout}")
+endif()
+
+execute_process(
+    COMMAND "${MOULT_EXE}" apply --dry-run "${SLICED_PLAN}"
+    RESULT_VARIABLE sliced_apply_result
+    OUTPUT_VARIABLE sliced_apply_stdout
+    ERROR_VARIABLE sliced_apply_stderr
+)
+if (NOT sliced_apply_result EQUAL 0)
+    message(FATAL_ERROR "moult sliced dry-run apply failed\nstdout:\n${sliced_apply_stdout}\nstderr:\n${sliced_apply_stderr}")
+endif()
+if (NOT sliced_apply_stdout MATCHES "would update")
+    message(FATAL_ERROR "expected sliced dry-run apply to report updated file\nstdout:\n${sliced_apply_stdout}")
 endif()
 
 execute_process(

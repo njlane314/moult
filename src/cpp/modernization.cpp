@@ -90,6 +90,16 @@ constexpr Opportunity review_raw_delete{
     "Review raw delete usage for replacement with RAII ownership.",
     "Manual deletion is often a sign that ownership should move to a smart pointer or value type."};
 
+constexpr Opportunity review_c_style_cast{
+    "review-c-style-cast",
+    "(",
+    "",
+    core::Confidence::Medium,
+    false,
+    "review C-style cast",
+    "Review C-style cast usage for replacement with named C++ casts.",
+    "C-style casts can combine const, static, and reinterpret cast behaviour; named C++ casts make intent reviewable."};
+
 bool is_identifier_char(char c) noexcept {
     const auto uc = static_cast<unsigned char>(c);
     return std::isalnum(uc) || c == '_';
@@ -103,6 +113,64 @@ bool has_identifier_boundaries(std::string_view text, std::size_t begin, std::si
 
 bool starts_with(std::string_view text, std::size_t pos, std::string_view token) noexcept {
     return pos <= text.size() && token.size() <= text.size() - pos && text.substr(pos, token.size()) == token;
+}
+
+std::string_view trim(std::string_view text) {
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) text.remove_prefix(1);
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.remove_suffix(1);
+    return text;
+}
+
+bool is_cast_type_word(std::string_view word) {
+    return word == "const" || word == "volatile" || word == "signed" || word == "unsigned" || word == "short" ||
+           word == "long" || word == "void" || word == "bool" || word == "char" || word == "char8_t" ||
+           word == "char16_t" || word == "char32_t" || word == "wchar_t" || word == "int" || word == "float" ||
+           word == "double" || word == "size_t" || word == "std::size_t";
+}
+
+bool is_builtin_c_style_cast_type(std::string_view type_text) {
+    type_text = trim(type_text);
+    if (type_text.empty() || type_text.size() > 64) return false;
+    if (type_text == "void") return false;
+
+    bool saw_type = false;
+    std::size_t pos = 0;
+    while (pos < type_text.size()) {
+        const char c = type_text[pos];
+        if (std::isspace(static_cast<unsigned char>(c)) || c == '*' || c == '&') {
+            ++pos;
+            continue;
+        }
+        const std::size_t begin = pos;
+        while (pos < type_text.size() &&
+               (std::isalnum(static_cast<unsigned char>(type_text[pos])) || type_text[pos] == '_' ||
+                type_text[pos] == ':')) {
+            ++pos;
+        }
+        if (begin == pos) return false;
+        const std::string_view word = type_text.substr(begin, pos - begin);
+        if (!is_cast_type_word(word)) return false;
+        if (word != "const" && word != "volatile" && word != "signed" && word != "unsigned" && word != "short" &&
+            word != "long") {
+            saw_type = true;
+        }
+    }
+    return saw_type;
+}
+
+std::optional<std::size_t> c_style_cast_range_end(std::string_view text, std::size_t pos) {
+    if (pos >= text.size() || text[pos] != '(') return std::nullopt;
+    const std::size_t close = text.find(')', pos + 1);
+    if (close == std::string_view::npos) return std::nullopt;
+    if (!is_builtin_c_style_cast_type(text.substr(pos + 1, close - pos - 1))) return std::nullopt;
+
+    std::size_t next = close + 1;
+    while (next < text.size() && std::isspace(static_cast<unsigned char>(text[next]))) ++next;
+    if (next >= text.size()) return std::nullopt;
+    if (text[next] == ';' || text[next] == ',' || text[next] == ')' || text[next] == ']' || text[next] == '{') {
+        return std::nullopt;
+    }
+    return close + 1;
 }
 
 bool is_preprocessor_directive_start(std::string_view text, std::size_t pos) noexcept {
@@ -218,6 +286,11 @@ void scan_source(const core::SourceBuffer& source, core::FactStore& facts) {
             continue;
         }
 
+        if (auto cast_end = c_style_cast_range_end(text, pos)) {
+            add_opportunity(facts, source.path(), pos, *cast_end, review_c_style_cast);
+            pos = *cast_end;
+            continue;
+        }
         if (starts_with(text, pos, use_noexcept.token) && has_identifier_boundaries(text, pos, pos + 5)) {
             add_opportunity(facts, source.path(), pos, pos + use_noexcept.token.size(), use_noexcept);
             pos += use_noexcept.token.size();

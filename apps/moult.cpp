@@ -29,6 +29,7 @@ enum class Command {
     Plan,
     Apply,
     Report,
+    Slice,
     Diff,
     Review
 };
@@ -50,8 +51,8 @@ struct CliOptions {
     std::vector<std::string> clang_args;
     std::vector<std::string> include_patterns;
     std::vector<std::string> exclude_patterns;
-    std::vector<std::string> report_rule_patterns;
-    std::vector<std::string> report_file_patterns;
+    std::vector<std::string> filter_rule_patterns;
+    std::vector<std::string> filter_file_patterns;
     std::vector<std::filesystem::path> inputs;
 };
 
@@ -76,6 +77,7 @@ void print_usage(std::ostream& out) {
     out << "usage: moult <scan|plan> [options] [file-or-directory]...\n"
         << "       moult apply [options] <plan.json>\n"
         << "       moult report [options] <plan.json>\n"
+        << "       moult slice --rule <glob>|--file <glob> --out <plan.json> <plan.json>\n"
         << "       moult diff <plan.json>\n"
         << "       moult review <plan.json-or-output-directory>\n"
         << "\n"
@@ -94,9 +96,9 @@ void print_usage(std::ostream& out) {
         << "  --exclude-vendored           skip common vendored dependency directories during scans\n"
         << "  --summary-only               for report, omit item-by-item sections\n"
         << "  --limit <count>              for report, grouped summary rows to show (default: 12)\n"
-        << "  --rule <glob>                for report, show matching rule IDs only; repeat as needed\n"
-        << "  --file <glob>                for report, show matching source paths only; repeat as needed\n"
-        << "  --out <directory>            write plan.json, facts.json, evidence.jsonl, findings.sarif\n"
+        << "  --rule <glob>                for report/slice, match rule IDs; repeat as needed\n"
+        << "  --file <glob>                for report/slice, match source paths; repeat as needed\n"
+        << "  --out <path>                 for plan, output directory; for slice, output plan.json path\n"
         << "  --min-confidence <level>     low, medium, high, or proven (default: high)\n"
         << "  --include-facts              include facts inside plan.json/stdout JSON\n"
         << "  --dry-run                    for apply, list files that would change\n"
@@ -488,6 +490,75 @@ std::map<std::string, std::string> json_string_attributes(const JsonValue& objec
     return out;
 }
 
+JsonValue json_bool_value(bool value) {
+    JsonValue out;
+    out.type = JsonValue::Type::Bool;
+    out.boolean = value;
+    return out;
+}
+
+JsonValue json_number_value(std::size_t value) {
+    JsonValue out;
+    out.type = JsonValue::Type::Number;
+    out.number = value;
+    return out;
+}
+
+JsonValue json_array_value(std::vector<JsonValue> values) {
+    JsonValue out;
+    out.type = JsonValue::Type::Array;
+    out.array = std::move(values);
+    return out;
+}
+
+void set_object_field(JsonValue& object, std::string name, JsonValue value) {
+    if (object.type != JsonValue::Type::Object) throw std::runtime_error("expected JSON object");
+    object.object[std::move(name)] = std::move(value);
+}
+
+void write_json_value(std::ostream& out, const JsonValue& value);
+
+void write_json_array(std::ostream& out, const std::vector<JsonValue>& values) {
+    out << "[";
+    bool first = true;
+    for (const JsonValue& item : values) {
+        if (!first) out << ",";
+        first = false;
+        write_json_value(out, item);
+    }
+    out << "]";
+}
+
+void write_json_object(std::ostream& out, const std::map<std::string, JsonValue>& values) {
+    out << "{";
+    bool first = true;
+    for (const auto& [key, item] : values) {
+        if (!first) out << ",";
+        first = false;
+        moult::core::json_write_string(out, key);
+        out << ":";
+        write_json_value(out, item);
+    }
+    out << "}";
+}
+
+void write_json_value(std::ostream& out, const JsonValue& value) {
+    switch (value.type) {
+        case JsonValue::Type::Null: out << "null"; break;
+        case JsonValue::Type::Bool: out << (value.boolean ? "true" : "false"); break;
+        case JsonValue::Type::Number: out << value.number; break;
+        case JsonValue::Type::String: moult::core::json_write_string(out, value.string); break;
+        case JsonValue::Type::Array: write_json_array(out, value.array); break;
+        case JsonValue::Type::Object: write_json_object(out, value.object); break;
+    }
+}
+
+std::string json_value_to_string(const JsonValue& value) {
+    std::ostringstream out;
+    write_json_value(out, value);
+    return out.str();
+}
+
 std::vector<std::string> split_command_line(std::string_view command) {
     std::vector<std::string> out;
     std::string current;
@@ -782,6 +853,19 @@ std::optional<std::string> optional_range_file(const JsonValue& object, std::str
     return file->string;
 }
 
+bool plan_filter_active(const CliOptions& cli) {
+    return !cli.filter_rule_patterns.empty() || !cli.filter_file_patterns.empty();
+}
+
+bool plan_item_matches_filter(const CliOptions& cli, std::string_view rule_id, const std::optional<std::string>& file) {
+    if (!cli.filter_rule_patterns.empty() && !matches_any_text_pattern(cli.filter_rule_patterns, rule_id)) return false;
+    if (!cli.filter_file_patterns.empty()) {
+        if (!file) return false;
+        if (!matches_any_pattern(cli.filter_file_patterns, std::filesystem::path(*file))) return false;
+    }
+    return true;
+}
+
 std::string directory_key_for_file(const std::string& file) {
     if (file.empty()) return "no source range";
     const auto parent = std::filesystem::path(file).parent_path();
@@ -935,6 +1019,69 @@ bool finding_is_planned_edit(const JsonValue& finding) {
 void print_report_section_empty(std::ostream& out, std::string_view label) {
     out << "\n" << label << "\n";
     out << "  none\n";
+}
+
+std::optional<std::string> optional_id_field(const JsonValue& object, std::string_view name) {
+    const JsonValue* value = optional_object_field(object, name);
+    if (!value || value->type != JsonValue::Type::String || value->string.empty()) return std::nullopt;
+    return value->string;
+}
+
+void collect_optional_id(const JsonValue& object, std::string_view name, std::set<std::string>& ids) {
+    if (auto id = optional_id_field(object, name)) ids.insert(*id);
+}
+
+void collect_string_array(const JsonValue& object, std::string_view name, std::set<std::string>& ids) {
+    const JsonValue* array = optional_object_field(object, name);
+    if (!array || array->type != JsonValue::Type::Array) return;
+    for (const JsonValue& item : array->array) {
+        if (item.type == JsonValue::Type::String && !item.string.empty()) ids.insert(item.string);
+    }
+}
+
+JsonValue filter_string_array_value(const JsonValue* array, const std::set<std::string>& kept_ids) {
+    std::vector<JsonValue> out;
+    if (array && array->type == JsonValue::Type::Array) {
+        for (const JsonValue& item : array->array) {
+            if (item.type == JsonValue::Type::String && kept_ids.contains(item.string)) out.push_back(item);
+        }
+    }
+    return json_array_value(std::move(out));
+}
+
+bool diagnostic_is_error(const JsonValue& diagnostic) {
+    const JsonValue* severity = optional_object_field(diagnostic, "severity");
+    return severity && severity->type == JsonValue::Type::String && severity->string == "error";
+}
+
+bool plan_has_errors(const std::vector<JsonValue>& conflicts, const std::vector<JsonValue>& diagnostics) {
+    if (!conflicts.empty()) return true;
+    return std::any_of(diagnostics.begin(), diagnostics.end(), diagnostic_is_error);
+}
+
+std::vector<JsonValue> filter_groups(const JsonValue* groups,
+                                     const std::set<std::string>& kept_edit_ids,
+                                     const std::set<std::string>& kept_finding_ids) {
+    if (!groups || groups->type != JsonValue::Type::Array) return {};
+
+    std::vector<JsonValue> out;
+    std::set<std::string> kept_group_ids;
+    for (const JsonValue& group : groups->array) {
+        if (group.type != JsonValue::Type::Object) continue;
+        JsonValue filtered_group = group;
+        JsonValue edit_ids = filter_string_array_value(optional_object_field(group, "edit_ids"), kept_edit_ids);
+        JsonValue finding_ids = filter_string_array_value(optional_object_field(group, "finding_ids"), kept_finding_ids);
+        if (edit_ids.array.empty() && finding_ids.array.empty()) continue;
+        set_object_field(filtered_group, "edit_ids", std::move(edit_ids));
+        set_object_field(filtered_group, "finding_ids", std::move(finding_ids));
+        if (auto id = optional_id_field(group, "id")) kept_group_ids.insert(*id);
+        out.push_back(std::move(filtered_group));
+    }
+
+    for (JsonValue& group : out) {
+        set_object_field(group, "requires", filter_string_array_value(optional_object_field(group, "requires"), kept_group_ids));
+    }
+    return out;
 }
 
 std::vector<std::string> split_lines_preserve_newlines(std::string_view text) {
@@ -1211,6 +1358,151 @@ int apply_plan(const CliOptions& cli) {
     return 0;
 }
 
+int slice_plan(const CliOptions& cli) {
+    if (cli.inputs.size() != 1) {
+        std::cerr << "slice requires exactly one plan.json path\n";
+        return 2;
+    }
+    if (!cli.output_dir) {
+        std::cerr << "slice requires --out <plan.json>\n";
+        return 2;
+    }
+    if (!plan_filter_active(cli)) {
+        std::cerr << "slice requires at least one --rule or --file filter\n";
+        return 2;
+    }
+
+    std::string text;
+    if (!read_text_file(cli.inputs.front(), text)) {
+        std::cerr << "failed to read plan: " << cli.inputs.front() << "\n";
+        return 1;
+    }
+
+    JsonValue root;
+    try {
+        root = JsonParser(text).parse();
+        if (root.type != JsonValue::Type::Object) throw std::runtime_error("plan.json must be an object");
+    } catch (const std::exception& ex) {
+        std::cerr << ex.what() << "\n";
+        return 1;
+    }
+
+    try {
+        const JsonValue& edits = json_array_field(root, "edits");
+        const JsonValue& findings = json_array_field(root, "findings");
+        const JsonValue& conflicts = json_array_field(root, "edit_conflicts");
+        const JsonValue& diagnostics = json_array_field(root, "diagnostics");
+
+        std::vector<JsonValue> kept_edits;
+        std::vector<JsonValue> kept_findings;
+        std::vector<JsonValue> kept_conflicts;
+        std::vector<JsonValue> kept_diagnostics;
+        std::set<std::string> kept_edit_ids;
+        std::set<std::string> kept_finding_ids;
+        std::set<std::string> referenced_evidence_ids;
+
+        for (const JsonValue& edit : edits.array) {
+            if (edit.type != JsonValue::Type::Object) continue;
+            const std::string rule_id = json_string_field(edit, "rule_id");
+            if (!plan_item_matches_filter(cli, rule_id, optional_range_file(edit))) continue;
+            collect_optional_id(edit, "id", kept_edit_ids);
+            collect_optional_id(edit, "evidence_id", referenced_evidence_ids);
+            kept_edits.push_back(edit);
+        }
+        for (const JsonValue& finding : findings.array) {
+            if (finding.type != JsonValue::Type::Object) continue;
+            const std::string rule_id = json_string_field(finding, "rule_id");
+            if (!plan_item_matches_filter(cli, rule_id, optional_range_file(finding))) continue;
+            collect_optional_id(finding, "id", kept_finding_ids);
+            collect_optional_id(finding, "evidence_id", referenced_evidence_ids);
+            kept_findings.push_back(finding);
+        }
+        for (const JsonValue& conflict : conflicts.array) {
+            if (conflict.type != JsonValue::Type::Object) continue;
+            if (!plan_item_matches_filter(cli, "edit conflict", optional_range_file(conflict, "proposed_range"))) continue;
+            kept_conflicts.push_back(conflict);
+        }
+        for (const JsonValue& diagnostic : diagnostics.array) {
+            if (diagnostic.type != JsonValue::Type::Object) continue;
+            const std::string rule_id = "diagnostic:" + json_string_field(diagnostic, "code");
+            if (!plan_item_matches_filter(cli, rule_id, optional_range_file(diagnostic))) continue;
+            kept_diagnostics.push_back(diagnostic);
+        }
+
+        std::vector<JsonValue> kept_evidence;
+        std::set<std::string> referenced_fact_ids;
+        if (const JsonValue* evidence = optional_object_field(root, "evidence")) {
+            if (evidence->type != JsonValue::Type::Array) throw std::runtime_error("expected array field: evidence");
+            for (const JsonValue& record : evidence->array) {
+                if (record.type != JsonValue::Type::Object) continue;
+                const auto id = optional_id_field(record, "id");
+                if (!id || !referenced_evidence_ids.contains(*id)) continue;
+                collect_string_array(record, "fact_ids", referenced_fact_ids);
+                kept_evidence.push_back(record);
+            }
+        }
+
+        std::vector<JsonValue> kept_facts;
+        if (const JsonValue* facts = optional_object_field(root, "facts")) {
+            if (facts->type != JsonValue::Type::Array) throw std::runtime_error("expected array field: facts");
+            for (const JsonValue& fact : facts->array) {
+                if (fact.type != JsonValue::Type::Object) continue;
+                const auto id = optional_id_field(fact, "id");
+                if (id && referenced_fact_ids.contains(*id)) kept_facts.push_back(fact);
+            }
+        }
+
+        JsonValue sliced = root;
+        set_object_field(sliced, "accepted_edit_count", json_number_value(kept_edits.size()));
+        set_object_field(sliced, "conflict_count", json_number_value(kept_conflicts.size()));
+        set_object_field(sliced, "has_errors", json_bool_value(plan_has_errors(kept_conflicts, kept_diagnostics)));
+        set_object_field(sliced, "edits", json_array_value(std::move(kept_edits)));
+        set_object_field(sliced, "edit_conflicts", json_array_value(std::move(kept_conflicts)));
+        set_object_field(sliced, "findings", json_array_value(std::move(kept_findings)));
+        set_object_field(sliced, "diagnostics", json_array_value(std::move(kept_diagnostics)));
+        if (optional_object_field(root, "evidence")) set_object_field(sliced, "evidence", json_array_value(std::move(kept_evidence)));
+        if (optional_object_field(root, "facts")) set_object_field(sliced, "facts", json_array_value(std::move(kept_facts)));
+        if (optional_object_field(root, "groups")) {
+            set_object_field(sliced,
+                             "groups",
+                             json_array_value(filter_groups(optional_object_field(root, "groups"), kept_edit_ids, kept_finding_ids)));
+        }
+
+        std::filesystem::path out_path = *cli.output_dir;
+        if (out_path.empty()) {
+            std::cerr << "slice requires a non-empty --out path\n";
+            return 2;
+        }
+        std::error_code ec;
+        const auto parent = out_path.parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            std::cerr << "failed to create output directory: " << ec.message() << "\n";
+            return 1;
+        }
+        if (!write_text_file(out_path, json_value_to_string(sliced))) {
+            std::cerr << "failed to write sliced plan: " << out_path << "\n";
+            return 1;
+        }
+
+        std::cout << "wrote sliced plan: " << out_path << "\n";
+        std::cout << "accepted edits: " << json_number_field(sliced, "accepted_edit_count") << "\n";
+        std::cout << "manual-review findings: ";
+        std::size_t manual_count = 0;
+        for (const JsonValue& finding : json_array_field(sliced, "findings").array) {
+            if (finding.type == JsonValue::Type::Object && !finding_is_planned_edit(finding)) ++manual_count;
+        }
+        std::cout << manual_count << "\n";
+        std::cout << "conflicts: " << json_number_field(sliced, "conflict_count") << "\n";
+        std::cout << "diagnostics: " << json_array_field(sliced, "diagnostics").array.size() << "\n";
+    } catch (const std::exception& ex) {
+        std::cerr << "failed to slice plan: " << ex.what() << "\n";
+        return 1;
+    }
+
+    return 0;
+}
+
 int report_plan(const CliOptions& cli) {
     if (cli.inputs.size() != 1) {
         std::cerr << "report requires exactly one plan.json path\n";
@@ -1239,17 +1531,6 @@ int report_plan(const CliOptions& cli) {
         const JsonValue& conflicts = json_array_field(root, "edit_conflicts");
         const JsonValue& diagnostics = json_array_field(root, "diagnostics");
 
-        auto report_item_matches = [&](std::string_view rule_id, const std::optional<std::string>& file) {
-            if (!cli.report_rule_patterns.empty() && !matches_any_text_pattern(cli.report_rule_patterns, rule_id)) {
-                return false;
-            }
-            if (!cli.report_file_patterns.empty()) {
-                if (!file) return false;
-                if (!matches_any_pattern(cli.report_file_patterns, std::filesystem::path(*file))) return false;
-            }
-            return true;
-        };
-
         std::vector<const JsonValue*> edits_to_report;
         std::vector<const JsonValue*> findings_to_report;
         std::vector<const JsonValue*> conflicts_to_report;
@@ -1267,7 +1548,7 @@ int report_plan(const CliOptions& cli) {
         for (const auto& edit : edits.array) {
             if (edit.type != JsonValue::Type::Object) continue;
             const std::string rule_id = json_string_field(edit, "rule_id");
-            if (!report_item_matches(rule_id, optional_range_file(edit))) continue;
+            if (!plan_item_matches_filter(cli, rule_id, optional_range_file(edit))) continue;
             edits_to_report.push_back(&edit);
             add_report_bucket(by_rule, rule_id, ReportBucketKind::Edit);
             add_source_summary(edit, ReportBucketKind::Edit);
@@ -1275,14 +1556,14 @@ int report_plan(const CliOptions& cli) {
         for (const auto& finding : findings.array) {
             if (finding.type != JsonValue::Type::Object || finding_is_planned_edit(finding)) continue;
             const std::string rule_id = json_string_field(finding, "rule_id");
-            if (!report_item_matches(rule_id, optional_range_file(finding))) continue;
+            if (!plan_item_matches_filter(cli, rule_id, optional_range_file(finding))) continue;
             findings_to_report.push_back(&finding);
             add_report_bucket(by_rule, rule_id, ReportBucketKind::Manual);
             add_source_summary(finding, ReportBucketKind::Manual);
         }
         for (const auto& conflict : conflicts.array) {
             if (conflict.type != JsonValue::Type::Object) continue;
-            if (!report_item_matches("edit conflict", optional_range_file(conflict, "proposed_range"))) continue;
+            if (!plan_item_matches_filter(cli, "edit conflict", optional_range_file(conflict, "proposed_range"))) continue;
             conflicts_to_report.push_back(&conflict);
             add_report_bucket(by_rule, "edit conflict", ReportBucketKind::Conflict);
             add_source_summary(conflict, ReportBucketKind::Conflict, "proposed_range");
@@ -1290,7 +1571,7 @@ int report_plan(const CliOptions& cli) {
         for (const auto& diagnostic : diagnostics.array) {
             if (diagnostic.type != JsonValue::Type::Object) continue;
             const std::string rule_id = "diagnostic:" + json_string_field(diagnostic, "code");
-            if (!report_item_matches(rule_id, optional_range_file(diagnostic))) continue;
+            if (!plan_item_matches_filter(cli, rule_id, optional_range_file(diagnostic))) continue;
             diagnostics_to_report.push_back(&diagnostic);
             add_report_bucket(by_rule, rule_id, ReportBucketKind::Diagnostic);
             add_source_summary(diagnostic, ReportBucketKind::Diagnostic);
@@ -1301,7 +1582,7 @@ int report_plan(const CliOptions& cli) {
         const std::size_t review_count = findings_to_report.size();
         const std::size_t conflict_count = conflicts_to_report.size();
         const std::size_t diagnostic_count = diagnostics_to_report.size();
-        const bool filtered = !cli.report_rule_patterns.empty() || !cli.report_file_patterns.empty();
+        const bool filtered = plan_filter_active(cli);
         std::cout << "Moult Report\n";
         std::cout << "Target: " << json_string_field(root, "target") << "\n";
         std::cout << "Action: " << json_string_field(root, "action") << "\n";
@@ -1312,8 +1593,8 @@ int report_plan(const CliOptions& cli) {
         std::cout << "Diagnostics: " << diagnostic_count << "\n";
         if (filtered) {
             std::cout << "Filters:";
-            for (const auto& pattern : cli.report_rule_patterns) std::cout << " rule=" << shell_quote(pattern);
-            for (const auto& pattern : cli.report_file_patterns) std::cout << " file=" << shell_quote(pattern);
+            for (const auto& pattern : cli.filter_rule_patterns) std::cout << " rule=" << shell_quote(pattern);
+            for (const auto& pattern : cli.filter_file_patterns) std::cout << " file=" << shell_quote(pattern);
             std::cout << "\n";
         }
         print_report_buckets(std::cout, "Summary by Rule", by_rule, cli.report_limit);
@@ -1527,6 +1808,8 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
         options.action = moult::core::PlanAction::Apply;
     } else if (command == "report") {
         options.command = Command::Report;
+    } else if (command == "slice") {
+        options.command = Command::Slice;
     } else if (command == "diff") {
         options.command = Command::Diff;
     } else if (command == "review") {
@@ -1618,13 +1901,13 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
         if (arg == "--rule") {
             auto value = require_value("--rule");
             if (!value) return std::nullopt;
-            options.report_rule_patterns.push_back(*value);
+            options.filter_rule_patterns.push_back(*value);
             continue;
         }
         if (arg == "--file") {
             auto value = require_value("--file");
             if (!value) return std::nullopt;
-            options.report_file_patterns.push_back(*value);
+            options.filter_file_patterns.push_back(*value);
             continue;
         }
         if (arg == "--out") {
@@ -1680,6 +1963,7 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
     }
 
     const bool artefact_command = options.command == Command::Apply || options.command == Command::Report ||
+                                  options.command == Command::Slice ||
                                   options.command == Command::Diff || options.command == Command::Review;
     if (options.inputs.empty() && (artefact_command || !options.compile_commands_path)) {
         std::cerr << (artefact_command ? "plan.json path or output directory is required\n"
@@ -1688,10 +1972,25 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
         exit_code = 2;
         return std::nullopt;
     }
-    const bool has_report_options = options.report_summary_only || options.report_limit != 12 ||
-                                    !options.report_rule_patterns.empty() || !options.report_file_patterns.empty();
-    if (options.command != Command::Report && has_report_options) {
+    const bool has_filter_options = !options.filter_rule_patterns.empty() || !options.filter_file_patterns.empty();
+    const bool has_report_only_options = options.report_summary_only || options.report_limit != 12;
+    if (options.command != Command::Report && has_report_only_options) {
         std::cerr << "report options require the report command\n";
+        exit_code = 2;
+        return std::nullopt;
+    }
+    if (options.command != Command::Report && options.command != Command::Slice && has_filter_options) {
+        std::cerr << "--rule and --file require report or slice\n";
+        exit_code = 2;
+        return std::nullopt;
+    }
+    if (options.command == Command::Slice && !options.output_dir) {
+        std::cerr << "slice requires --out <plan.json>\n";
+        exit_code = 2;
+        return std::nullopt;
+    }
+    if (options.command == Command::Slice && !has_filter_options) {
+        std::cerr << "slice requires at least one --rule or --file filter\n";
         exit_code = 2;
         return std::nullopt;
     }
@@ -1737,6 +2036,7 @@ int main(int argc, char** argv) {
 
     if (cli.command == Command::Apply) return apply_plan(cli);
     if (cli.command == Command::Report) return report_plan(cli);
+    if (cli.command == Command::Slice) return slice_plan(cli);
     if (cli.command == Command::Diff) return diff_plan(cli);
     if (cli.command == Command::Review) return moult::cli::run_review_tui(cli.inputs.front());
 
