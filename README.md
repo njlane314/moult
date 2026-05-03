@@ -111,6 +111,13 @@ rejected edits removed. For automatic edits, the selected item includes a
 focused git-style patch hunk, with colour used for item types, confidence,
 decisions, and diff additions/removals.
 
+When scanning directories or compile databases, Moult classifies source
+language before loading files into the C++ modernisation target. Plain C files
+such as `.c`, C ABI headers guarded with `extern "C"`, and plain C-looking
+headers are skipped by default. During directory scans, `.h` files in C-only
+directories are also treated as C-side headers. Compile commands that explicitly
+compile a `.c` file as C++ still opt that file into C++ analysis.
+
 Currently supported checks:
 
 ```text

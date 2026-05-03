@@ -1,14 +1,94 @@
 #include "moult/core/source.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
 
 namespace moult::core {
 
+namespace {
+
+std::string lowercase(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+bool has_c_abi_header_markers(std::string_view text) {
+    return text.find("__cplusplus") != std::string_view::npos && text.find("extern \"C\"") != std::string_view::npos;
+}
+
+bool has_obvious_cxx_header_markers(std::string_view text) {
+    return text.find("namespace ") != std::string_view::npos || text.find("namespace\t") != std::string_view::npos ||
+           text.find("template <") != std::string_view::npos || text.find("template<") != std::string_view::npos ||
+           text.find("class ") != std::string_view::npos || text.find("class\t") != std::string_view::npos ||
+           text.find("std::") != std::string_view::npos || text.find("public:") != std::string_view::npos ||
+           text.find("private:") != std::string_view::npos || text.find("protected:") != std::string_view::npos ||
+           text.find("#include <cstddef>") != std::string_view::npos ||
+           text.find("#include <cstdint>") != std::string_view::npos ||
+           text.find("#include <memory>") != std::string_view::npos ||
+           text.find("#include <string>") != std::string_view::npos ||
+           text.find("#include <vector>") != std::string_view::npos;
+}
+
+bool has_plain_c_header_markers(std::string_view text) {
+    return text.find("#include <stddef.h>") != std::string_view::npos ||
+           text.find("#include <stdint.h>") != std::string_view::npos ||
+           text.find("#include <stdlib.h>") != std::string_view::npos ||
+           text.find("#include <stdio.h>") != std::string_view::npos ||
+           text.find("#include <string.h>") != std::string_view::npos ||
+           text.find("typedef struct ") != std::string_view::npos ||
+           text.find("typedef enum ") != std::string_view::npos;
+}
+
+} // namespace
+
+std::string_view to_string(SourceLanguage language) noexcept {
+    switch (language) {
+        case SourceLanguage::Unknown: return "unknown";
+        case SourceLanguage::C: return "c";
+        case SourceLanguage::Cxx: return "c++";
+    }
+    return "unknown";
+}
+
+SourceLanguage infer_source_language(const std::filesystem::path& path) {
+    const std::string ext = lowercase(path.extension().string());
+    if (ext == ".c") return SourceLanguage::C;
+    if (ext == ".cc" || ext == ".cpp" || ext == ".cxx" || ext == ".c++" || ext == ".hh" || ext == ".hpp" ||
+        ext == ".hxx" || ext == ".h++" || ext == ".ipp" || ext == ".ixx" || ext == ".tpp" || ext == ".txx") {
+        return SourceLanguage::Cxx;
+    }
+    if (ext == ".h") return SourceLanguage::Cxx;
+    return SourceLanguage::Unknown;
+}
+
+SourceLanguage infer_source_language(const std::filesystem::path& path, std::string_view text) {
+    const auto inferred = infer_source_language(path);
+    const std::string ext = lowercase(path.extension().string());
+    if (ext == ".h") {
+        if (has_c_abi_header_markers(text)) return SourceLanguage::C;
+        if (has_obvious_cxx_header_markers(text)) return SourceLanguage::Cxx;
+        if (has_plain_c_header_markers(text)) return SourceLanguage::C;
+        return SourceLanguage::Unknown;
+    }
+    return inferred;
+}
+
+bool is_cxx_language(SourceLanguage language) noexcept {
+    return language == SourceLanguage::Cxx;
+}
+
 SourceBuffer::SourceBuffer(std::string path, std::string text)
-    : path_(std::move(path)), text_(std::move(text)) {
+    : path_(std::move(path)), text_(std::move(text)), language_(infer_source_language(path_, text_)) {
+    recompute_line_starts();
+}
+
+SourceBuffer::SourceBuffer(std::string path, std::string text, SourceLanguage language)
+    : path_(std::move(path)), text_(std::move(text)), language_(language) {
     recompute_line_starts();
 }
 
@@ -51,15 +131,25 @@ SourceRange SourceBuffer::range(std::size_t begin, std::size_t end) const {
 }
 
 void SourceStore::add(std::string path, std::string text) {
+    const SourceLanguage language = infer_source_language(path, text);
+    add(std::move(path), std::move(text), language);
+}
+
+void SourceStore::add(std::string path, std::string text, SourceLanguage language) {
     const std::string key = path;
-    files_[key] = SourceBuffer(std::move(path), std::move(text));
+    files_[key] = SourceBuffer(std::move(path), std::move(text), language);
 }
 
 bool SourceStore::load_file(const std::filesystem::path& path) {
+    return load_file(path, infer_source_language(path));
+}
+
+bool SourceStore::load_file(const std::filesystem::path& path, SourceLanguage language) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return false;
     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    add(path.string(), std::move(text));
+    if (language == SourceLanguage::Unknown) language = infer_source_language(path, text);
+    add(path.string(), std::move(text), language);
     return true;
 }
 

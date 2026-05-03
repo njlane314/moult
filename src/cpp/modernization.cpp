@@ -349,6 +349,7 @@ void TextualCppModernizationAdapter::analyze(const core::SourceStore& sources,
                                              core::DiagnosticSink&,
                                              const core::RunOptions&) const {
     for (const auto& [_, source] : sources.files()) {
+        if (!core::is_cxx_language(source.language())) continue;
         scan_source(source, facts);
     }
 }

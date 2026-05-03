@@ -51,6 +51,17 @@ struct CompileCommandEntry {
     std::filesystem::path source_file;
     std::filesystem::path directory;
     std::vector<std::string> args;
+    moult::core::SourceLanguage language = moult::core::SourceLanguage::Unknown;
+};
+
+struct SourceInput {
+    std::filesystem::path path;
+    moult::core::SourceLanguage language = moult::core::SourceLanguage::Unknown;
+};
+
+struct DirectoryLanguageProfile {
+    bool has_c_source = false;
+    bool has_cxx_source = false;
 };
 
 void print_usage(std::ostream& out) {
@@ -86,23 +97,55 @@ std::string lowercase(std::string value) {
     return value;
 }
 
-bool is_cpp_source_like(const std::filesystem::path& path) {
-    const std::string ext = lowercase(path.extension().string());
-    return ext == ".c" || ext == ".cc" || ext == ".cpp" || ext == ".cxx" || ext == ".h" || ext == ".hh" ||
-           ext == ".hpp" || ext == ".hxx" || ext == ".ipp" || ext == ".ixx";
+bool is_cxx_input_language(moult::core::SourceLanguage language) {
+    return moult::core::is_cxx_language(language);
 }
 
-bool collect_input_files(const std::filesystem::path& input, std::vector<std::filesystem::path>& files) {
+bool needs_content_language_inference(const std::filesystem::path& path) {
+    return lowercase(path.extension().string()) == ".h";
+}
+
+bool is_c_source_extension(const std::filesystem::path& path) {
+    return lowercase(path.extension().string()) == ".c";
+}
+
+bool is_unambiguous_cxx_source_extension(const std::filesystem::path& path) {
+    const std::string ext = lowercase(path.extension().string());
+    return ext == ".cc" || ext == ".cpp" || ext == ".cxx" || ext == ".c++" || ext == ".ixx";
+}
+
+std::optional<SourceInput> source_input_from_path(const std::filesystem::path& path) {
+    const auto language = moult::core::infer_source_language(path);
+    if (!is_cxx_input_language(language)) return std::nullopt;
+    return SourceInput{path, needs_content_language_inference(path) ? moult::core::SourceLanguage::Unknown : language};
+}
+
+bool collect_input_files(const std::filesystem::path& input, std::vector<SourceInput>& files) {
     std::error_code ec;
     if (std::filesystem::is_regular_file(input, ec)) {
-        files.push_back(input);
+        if (auto source_input = source_input_from_path(input)) files.push_back(*source_input);
         return true;
     }
     if (!std::filesystem::is_directory(input, ec)) return false;
 
+    std::vector<std::filesystem::path> candidates;
+    std::map<std::filesystem::path, DirectoryLanguageProfile> directory_profiles;
     for (std::filesystem::recursive_directory_iterator it(input, ec), end; !ec && it != end; it.increment(ec)) {
         if (!it->is_regular_file(ec)) continue;
-        if (is_cpp_source_like(it->path())) files.push_back(it->path());
+        const auto path = it->path();
+        candidates.push_back(path);
+        auto& profile = directory_profiles[path.parent_path()];
+        profile.has_c_source = profile.has_c_source || is_c_source_extension(path);
+        profile.has_cxx_source = profile.has_cxx_source || is_unambiguous_cxx_source_extension(path);
+    }
+    for (const auto& path : candidates) {
+        if (needs_content_language_inference(path)) {
+            const auto profile = directory_profiles.find(path.parent_path());
+            if (profile != directory_profiles.end() && profile->second.has_c_source && !profile->second.has_cxx_source) {
+                continue;
+            }
+        }
+        if (auto source_input = source_input_from_path(path)) files.push_back(*source_input);
     }
     return !ec;
 }
@@ -444,6 +487,61 @@ std::vector<std::string> sanitize_compile_command(std::vector<std::string> args,
     return out;
 }
 
+moult::core::SourceLanguage language_from_x_value(std::string_view value) {
+    if (value == "c" || value == "c-header" || value == "cpp-output" || value == "objective-c" ||
+        value == "assembler-with-cpp") {
+        return moult::core::SourceLanguage::C;
+    }
+    if (value == "c++" || value == "c++-header" || value == "c++-cpp-output" || value == "objective-c++") {
+        return moult::core::SourceLanguage::Cxx;
+    }
+    return moult::core::SourceLanguage::Unknown;
+}
+
+std::optional<moult::core::SourceLanguage> explicit_language_from_args(const std::vector<std::string>& args) {
+    std::optional<moult::core::SourceLanguage> out;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const std::string& arg = args[i];
+        if (arg == "-x" && i + 1 < args.size()) {
+            const auto language = language_from_x_value(args[i + 1]);
+            if (language != moult::core::SourceLanguage::Unknown) out = language;
+            continue;
+        }
+        if (arg.rfind("-x", 0) == 0 && arg.size() > 2) {
+            const auto language = language_from_x_value(std::string_view(arg).substr(2));
+            if (language != moult::core::SourceLanguage::Unknown) out = language;
+        }
+    }
+    return out;
+}
+
+bool has_cxx_standard_arg(const std::vector<std::string>& args) {
+    return std::any_of(args.begin(), args.end(), [](const std::string& arg) {
+        return arg.rfind("-std=c++", 0) == 0 || arg.rfind("-std=gnu++", 0) == 0 || arg.rfind("/std:c++", 0) == 0;
+    });
+}
+
+bool compiler_name_is_cxx(std::string compiler) {
+    compiler = lowercase(std::filesystem::path(std::move(compiler)).filename().string());
+    if (compiler.size() > 4 && compiler.substr(compiler.size() - 4) == ".exe") compiler.resize(compiler.size() - 4);
+    return compiler == "c++" || compiler == "g++" || compiler == "clang++" || compiler.find("g++-") == 0 ||
+           compiler.find("clang++-") == 0 || compiler.find("++") != std::string::npos;
+}
+
+moult::core::SourceLanguage infer_source_language_from_compile_command(const std::vector<std::string>& args,
+                                                                       const std::filesystem::path& source_file) {
+    if (auto explicit_language = explicit_language_from_args(args)) return *explicit_language;
+
+    const auto path_language = moult::core::infer_source_language(source_file);
+    if (path_language == moult::core::SourceLanguage::C && !args.empty()) {
+        std::size_t compiler_index = 0;
+        const std::string first = lowercase(std::filesystem::path(args.front()).filename().string());
+        if ((first == "ccache" || first == "sccache" || first == "distcc") && args.size() > 1) compiler_index = 1;
+        if (compiler_name_is_cxx(args[compiler_index]) || has_cxx_standard_arg(args)) return moult::core::SourceLanguage::Cxx;
+    }
+    return path_language;
+}
+
 std::vector<CompileCommandEntry> parse_compile_commands_file(const std::filesystem::path& path) {
     std::string text;
     if (!read_text_file(path, text)) throw std::runtime_error("failed to read compile commands: " + path.string());
@@ -480,15 +578,18 @@ std::vector<CompileCommandEntry> parse_compile_commands_file(const std::filesyst
         out.push_back(CompileCommandEntry{
             source_file,
             command_directory,
-            sanitize_compile_command(std::move(args), source_file, command_directory)});
+            sanitize_compile_command(args, source_file, command_directory),
+            infer_source_language_from_compile_command(args, source_file)});
     }
     return out;
 }
 
-std::vector<std::filesystem::path> source_files_from_compile_commands(const std::vector<CompileCommandEntry>& entries) {
-    std::vector<std::filesystem::path> out;
+std::vector<SourceInput> source_files_from_compile_commands(const std::vector<CompileCommandEntry>& entries) {
+    std::vector<SourceInput> out;
     out.reserve(entries.size());
-    for (const auto& entry : entries) out.push_back(entry.source_file);
+    for (const auto& entry : entries) {
+        if (is_cxx_input_language(entry.language)) out.push_back(SourceInput{entry.source_file, entry.language});
+    }
     return out;
 }
 
@@ -1229,7 +1330,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::vector<std::filesystem::path> files;
+    std::vector<SourceInput> files;
     if (cli.inputs.empty()) {
         files = source_files_from_compile_commands(compile_command_entries);
     } else {
@@ -1240,8 +1341,13 @@ int main(int argc, char** argv) {
             }
         }
     }
-    std::sort(files.begin(), files.end());
-    files.erase(std::unique(files.begin(), files.end()), files.end());
+    std::sort(files.begin(), files.end(), [](const SourceInput& lhs, const SourceInput& rhs) {
+        return lhs.path < rhs.path;
+    });
+    files.erase(std::unique(files.begin(), files.end(), [](const SourceInput& lhs, const SourceInput& rhs) {
+                    return lhs.path == rhs.path;
+                }),
+                files.end());
     if (files.empty()) {
         std::cerr << "no C++ source-like files found\n";
         return 1;
@@ -1249,8 +1355,8 @@ int main(int argc, char** argv) {
 
     moult::core::SourceStore sources;
     for (const auto& file : files) {
-        if (!sources.load_file(file)) {
-            std::cerr << "failed to load file: " << file << "\n";
+        if (!sources.load_file(file.path, file.language)) {
+            std::cerr << "failed to load file: " << file.path << "\n";
             return 1;
         }
     }

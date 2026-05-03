@@ -610,6 +610,7 @@ void ClangCppModernizationAdapter::analyze(const core::SourceStore& sources,
     }
 
     for (const auto& [path, source] : sources.files()) {
+        if (!core::is_cxx_language(source.language())) continue;
         const auto& source_args = args_for_source(path, compile_commands_, command_line_args_);
         const auto args = c_args(source_args);
         CXUnsavedFile unsaved{source.path().c_str(), source.text().c_str(), static_cast<unsigned long>(source.text().size())};
