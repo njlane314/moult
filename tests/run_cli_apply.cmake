@@ -18,13 +18,15 @@ file(WRITE "${WORK_DIR}/skip.cpp" "int* skip = NULL;\n")
 file(MAKE_DIRECTORY "${WORK_DIR}/c_lib")
 file(WRITE "${WORK_DIR}/c_lib/only_c.c" "void only_c(void) {}\n")
 file(WRITE "${WORK_DIR}/c_lib/private_impl.h" "static void* private_impl_null(void) { return NULL; }\n")
+file(MAKE_DIRECTORY "${WORK_DIR}/third_party")
+file(WRITE "${WORK_DIR}/third_party/vendored.cpp" "int* vendored = NULL;\n")
 
 set(INPUT "${WORK_DIR}/legacy_modernisation.cpp")
 set(OUTPUT_DIR "${WORK_DIR}/out")
 set(LANGUAGE_OUTPUT_DIR "${WORK_DIR}/language-out")
 
 execute_process(
-    COMMAND "${MOULT_EXE}" plan --adapter textual --include "*.cpp" --exclude "skip.cpp" --out "${LANGUAGE_OUTPUT_DIR}" "${WORK_DIR}"
+    COMMAND "${MOULT_EXE}" plan --adapter textual --include "*.cpp" --exclude "skip.cpp" --exclude-vendored --out "${LANGUAGE_OUTPUT_DIR}" "${WORK_DIR}"
     RESULT_VARIABLE language_plan_result
     OUTPUT_VARIABLE language_plan_stdout
     ERROR_VARIABLE language_plan_stderr
@@ -59,6 +61,9 @@ if (language_report_stdout MATCHES "private_impl.h")
 endif()
 if (language_report_stdout MATCHES "skip.cpp")
     message(FATAL_ERROR "excluded C++ source should not appear in C++ modernisation report")
+endif()
+if (language_report_stdout MATCHES "vendored.cpp")
+    message(FATAL_ERROR "vendored C++ source should not appear when --exclude-vendored is set")
 endif()
 
 execute_process(
@@ -100,6 +105,28 @@ if (NOT report_stdout MATCHES "Summary by Directory")
 endif()
 if (NOT report_stdout MATCHES "Recommended Next Action")
     message(FATAL_ERROR "expected recommended next action in report")
+endif()
+
+execute_process(
+    COMMAND "${MOULT_EXE}" report --summary-only --limit 1 --rule "modernise.use-nullptr" --file "legacy_modernisation.cpp" "${OUTPUT_DIR}/plan.json"
+    RESULT_VARIABLE filtered_report_result
+    OUTPUT_VARIABLE filtered_report_stdout
+    ERROR_VARIABLE filtered_report_stderr
+)
+if (NOT filtered_report_result EQUAL 0)
+    message(FATAL_ERROR "moult filtered report failed\nstdout:\n${filtered_report_stdout}\nstderr:\n${filtered_report_stderr}")
+endif()
+if (NOT filtered_report_stdout MATCHES "Accepted edits: 1")
+    message(FATAL_ERROR "expected rule-filtered report to include only nullptr edit\nstdout:\n${filtered_report_stdout}")
+endif()
+if (NOT filtered_report_stdout MATCHES "Filters: rule=modernise.use-nullptr file=legacy_modernisation.cpp")
+    message(FATAL_ERROR "expected report filter summary\nstdout:\n${filtered_report_stdout}")
+endif()
+if (filtered_report_stdout MATCHES "Planned Edits")
+    message(FATAL_ERROR "summary-only report should omit itemised planned edits\nstdout:\n${filtered_report_stdout}")
+endif()
+if (filtered_report_stdout MATCHES "modernise.use-noexcept")
+    message(FATAL_ERROR "rule-filtered report should not include other rules\nstdout:\n${filtered_report_stdout}")
 endif()
 
 execute_process(

@@ -43,10 +43,15 @@ struct CliOptions {
     bool include_facts = false;
     bool dry_run = false;
     bool backup = false;
+    bool exclude_vendored = false;
+    bool report_summary_only = false;
+    std::size_t report_limit = 12;
     std::string adapter = "textual";
     std::vector<std::string> clang_args;
     std::vector<std::string> include_patterns;
     std::vector<std::string> exclude_patterns;
+    std::vector<std::string> report_rule_patterns;
+    std::vector<std::string> report_file_patterns;
     std::vector<std::filesystem::path> inputs;
 };
 
@@ -70,7 +75,7 @@ struct DirectoryLanguageProfile {
 void print_usage(std::ostream& out) {
     out << "usage: moult <scan|plan> [options] [file-or-directory]...\n"
         << "       moult apply [options] <plan.json>\n"
-        << "       moult report <plan.json>\n"
+        << "       moult report [options] <plan.json>\n"
         << "       moult diff <plan.json>\n"
         << "       moult review <plan.json-or-output-directory>\n"
         << "\n"
@@ -86,6 +91,11 @@ void print_usage(std::ostream& out) {
         << "  --compile-commands <path>    compile_commands.json path or build directory; used as input if no paths are given\n"
         << "  --include <glob>             keep matching source paths; repeat as needed\n"
         << "  --exclude <glob>             skip matching source paths; repeat as needed\n"
+        << "  --exclude-vendored           skip common vendored dependency directories during scans\n"
+        << "  --summary-only               for report, omit item-by-item sections\n"
+        << "  --limit <count>              for report, grouped summary rows to show (default: 12)\n"
+        << "  --rule <glob>                for report, show matching rule IDs only; repeat as needed\n"
+        << "  --file <glob>                for report, show matching source paths only; repeat as needed\n"
         << "  --out <directory>            write plan.json, facts.json, evidence.jsonl, findings.sarif\n"
         << "  --min-confidence <level>     low, medium, high, or proven (default: high)\n"
         << "  --include-facts              include facts inside plan.json/stdout JSON\n"
@@ -207,16 +217,55 @@ bool glob_matches_path(std::string pattern, const std::filesystem::path& path) {
     return glob_match(pattern, full) || glob_match("**/" + pattern, full);
 }
 
+bool glob_matches_text(std::string pattern, std::string_view text) {
+    pattern = normalise_glob_pattern(std::move(pattern));
+    return !pattern.empty() && glob_match(pattern, text);
+}
+
 bool matches_any_pattern(const std::vector<std::string>& patterns, const std::filesystem::path& path) {
     return std::any_of(patterns.begin(), patterns.end(), [&](const std::string& pattern) {
         return glob_matches_path(pattern, path);
     });
 }
 
+bool matches_any_text_pattern(const std::vector<std::string>& patterns, std::string_view text) {
+    return std::any_of(patterns.begin(), patterns.end(), [&](const std::string& pattern) {
+        return glob_matches_text(pattern, text);
+    });
+}
+
+const std::vector<std::string>& vendored_exclude_patterns() {
+    static const std::vector<std::string> patterns{
+        ".git/**",
+        "3rdparty/**",
+        "deps/**",
+        "dependencies/**",
+        "external/**",
+        "extern/**",
+        "node_modules/**",
+        "submodules/**",
+        "third_party/**",
+        "thirdparty/**",
+        "vendor/**",
+        "vendors/**",
+        "crc32c/**",
+        "leveldb/**",
+        "minisketch/**",
+        "secp256k1/**",
+        "univalue/**",
+    };
+    return patterns;
+}
+
 void apply_path_filters(const CliOptions& cli, std::vector<SourceInput>& files) {
+    std::vector<std::string> exclude_patterns = cli.exclude_patterns;
+    if (cli.exclude_vendored) {
+        const auto& vendored = vendored_exclude_patterns();
+        exclude_patterns.insert(exclude_patterns.end(), vendored.begin(), vendored.end());
+    }
     files.erase(std::remove_if(files.begin(), files.end(), [&](const SourceInput& file) {
                     if (!cli.include_patterns.empty() && !matches_any_pattern(cli.include_patterns, file.path)) return true;
-                    if (matches_any_pattern(cli.exclude_patterns, file.path)) return true;
+                    if (matches_any_pattern(exclude_patterns, file.path)) return true;
                     return false;
                 }),
                 files.end());
@@ -771,32 +820,84 @@ void print_report_buckets(std::ostream& out,
     if (shown < sorted.size()) out << "  ... " << (sorted.size() - shown) << " more\n";
 }
 
+std::optional<std::string> top_report_bucket_key(const std::map<std::string, ReportBucket>& buckets) {
+    const auto sorted = sorted_report_buckets(buckets);
+    for (const auto& [key, bucket] : sorted) {
+        if (bucket.total() > 0 && key != "no source range") return key;
+    }
+    return std::nullopt;
+}
+
+bool shell_safe(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '/' || c == '.' || c == '_' || c == '-' || c == ':' ||
+           c == '=' || c == '+';
+}
+
+std::string shell_quote(std::string value) {
+    if (value.empty()) return "''";
+    if (std::all_of(value.begin(), value.end(), shell_safe)) return value;
+    std::string out = "'";
+    for (char c : value) {
+        if (c == '\'') {
+            out += "'\\''";
+        } else {
+            out += c;
+        }
+    }
+    out += "'";
+    return out;
+}
+
+std::string directory_glob_for_report(std::string directory) {
+    if (directory.empty() || directory == ".") return "*";
+    if (!directory.empty() && directory.back() == '/') directory.pop_back();
+    return directory + "/**";
+}
+
 void print_recommended_next_action(std::ostream& out,
                                    const std::filesystem::path& plan_path,
                                    bool has_errors,
                                    std::size_t accepted_edits,
                                    std::size_t manual_review,
                                    std::size_t conflicts,
-                                   std::size_t diagnostics) {
+                                   std::size_t diagnostics,
+                                   const std::map<std::string, ReportBucket>& by_directory,
+                                   const std::map<std::string, ReportBucket>& by_rule,
+                                   bool report_filtered) {
     const std::size_t total = accepted_edits + manual_review + conflicts + diagnostics;
+    const std::string plan_arg = shell_quote(plan_path.string());
     out << "\nRecommended Next Action\n";
     if (has_errors || conflicts > 0) {
         out << "  Resolve conflicts and diagnostics before applying edits.\n";
-        out << "  Start with: moult review " << plan_path << "\n";
+        out << "  Start with: moult review " << plan_arg << "\n";
         return;
     }
     if (total > 500) {
-        out << "  Scope is large. Re-run plan with --include/--exclude to isolate one subsystem before applying edits.\n";
-        out << "  Then inspect with: moult review " << plan_path << "\n";
+        if (const auto top_directory = top_report_bucket_key(by_directory)) {
+            out << "  Scope is large. Start with the busiest directory:\n";
+            out << "  moult report --summary-only --file " << shell_quote(directory_glob_for_report(*top_directory)) << " "
+                << plan_arg << "\n";
+        } else {
+            out << "  Scope is large. Re-run plan with --include/--exclude to isolate one subsystem before applying edits.\n";
+        }
+        if (const auto top_rule = top_report_bucket_key(by_rule)) {
+            out << "  Then isolate the busiest rule:\n";
+            out << "  moult report --summary-only --rule " << shell_quote(*top_rule) << " " << plan_arg << "\n";
+        }
+        return;
+    }
+    if (report_filtered && total > 0) {
+        out << "  This is a filtered view. Use review decisions to change what apply will touch.\n";
+        out << "  Start with: moult review " << plan_arg << "\n";
         return;
     }
     if (accepted_edits > 0) {
-        out << "  Review the patch with: moult diff " << plan_path << "\n";
-        out << "  Then dry-run application with: moult apply --dry-run " << plan_path << "\n";
+        out << "  Review the patch with: moult diff " << plan_arg << "\n";
+        out << "  Then dry-run application with: moult apply --dry-run " << plan_arg << "\n";
         return;
     }
     if (manual_review > 0) {
-        out << "  Triage manual-review findings with: moult review " << plan_path << "\n";
+        out << "  Triage manual-review findings with: moult review " << plan_arg << "\n";
         return;
     }
     if (diagnostics > 0) {
@@ -1138,10 +1239,21 @@ int report_plan(const CliOptions& cli) {
         const JsonValue& conflicts = json_array_field(root, "edit_conflicts");
         const JsonValue& diagnostics = json_array_field(root, "diagnostics");
 
-        std::size_t review_count = 0;
-        for (const auto& finding : findings.array) {
-            if (finding.type == JsonValue::Type::Object && !finding_is_planned_edit(finding)) ++review_count;
-        }
+        auto report_item_matches = [&](std::string_view rule_id, const std::optional<std::string>& file) {
+            if (!cli.report_rule_patterns.empty() && !matches_any_text_pattern(cli.report_rule_patterns, rule_id)) {
+                return false;
+            }
+            if (!cli.report_file_patterns.empty()) {
+                if (!file) return false;
+                if (!matches_any_pattern(cli.report_file_patterns, std::filesystem::path(*file))) return false;
+            }
+            return true;
+        };
+
+        std::vector<const JsonValue*> edits_to_report;
+        std::vector<const JsonValue*> findings_to_report;
+        std::vector<const JsonValue*> conflicts_to_report;
+        std::vector<const JsonValue*> diagnostics_to_report;
         std::map<std::string, ReportBucket> by_rule;
         std::map<std::string, ReportBucket> by_directory;
         std::map<std::string, ReportBucket> by_file;
@@ -1154,53 +1266,79 @@ int report_plan(const CliOptions& cli) {
 
         for (const auto& edit : edits.array) {
             if (edit.type != JsonValue::Type::Object) continue;
-            add_report_bucket(by_rule, json_string_field(edit, "rule_id"), ReportBucketKind::Edit);
+            const std::string rule_id = json_string_field(edit, "rule_id");
+            if (!report_item_matches(rule_id, optional_range_file(edit))) continue;
+            edits_to_report.push_back(&edit);
+            add_report_bucket(by_rule, rule_id, ReportBucketKind::Edit);
             add_source_summary(edit, ReportBucketKind::Edit);
         }
         for (const auto& finding : findings.array) {
             if (finding.type != JsonValue::Type::Object || finding_is_planned_edit(finding)) continue;
-            add_report_bucket(by_rule, json_string_field(finding, "rule_id"), ReportBucketKind::Manual);
+            const std::string rule_id = json_string_field(finding, "rule_id");
+            if (!report_item_matches(rule_id, optional_range_file(finding))) continue;
+            findings_to_report.push_back(&finding);
+            add_report_bucket(by_rule, rule_id, ReportBucketKind::Manual);
             add_source_summary(finding, ReportBucketKind::Manual);
         }
         for (const auto& conflict : conflicts.array) {
             if (conflict.type != JsonValue::Type::Object) continue;
+            if (!report_item_matches("edit conflict", optional_range_file(conflict, "proposed_range"))) continue;
+            conflicts_to_report.push_back(&conflict);
             add_report_bucket(by_rule, "edit conflict", ReportBucketKind::Conflict);
             add_source_summary(conflict, ReportBucketKind::Conflict, "proposed_range");
         }
         for (const auto& diagnostic : diagnostics.array) {
             if (diagnostic.type != JsonValue::Type::Object) continue;
-            add_report_bucket(by_rule, "diagnostic:" + json_string_field(diagnostic, "code"), ReportBucketKind::Diagnostic);
+            const std::string rule_id = "diagnostic:" + json_string_field(diagnostic, "code");
+            if (!report_item_matches(rule_id, optional_range_file(diagnostic))) continue;
+            diagnostics_to_report.push_back(&diagnostic);
+            add_report_bucket(by_rule, rule_id, ReportBucketKind::Diagnostic);
             add_source_summary(diagnostic, ReportBucketKind::Diagnostic);
         }
 
         const bool has_errors = json_bool_field(root, "has_errors");
-        const std::size_t accepted_edit_count = json_number_field(root, "accepted_edit_count");
+        const std::size_t accepted_edit_count = edits_to_report.size();
+        const std::size_t review_count = findings_to_report.size();
+        const std::size_t conflict_count = conflicts_to_report.size();
+        const std::size_t diagnostic_count = diagnostics_to_report.size();
+        const bool filtered = !cli.report_rule_patterns.empty() || !cli.report_file_patterns.empty();
         std::cout << "Moult Report\n";
         std::cout << "Target: " << json_string_field(root, "target") << "\n";
         std::cout << "Action: " << json_string_field(root, "action") << "\n";
         std::cout << "Status: " << (has_errors ? "errors" : "ok") << "\n";
         std::cout << "Accepted edits: " << accepted_edit_count << "\n";
         std::cout << "Manual-review findings: " << review_count << "\n";
-        std::cout << "Conflicts: " << json_number_field(root, "conflict_count") << "\n";
-        std::cout << "Diagnostics: " << diagnostics.array.size() << "\n";
-        print_report_buckets(std::cout, "Summary by Rule", by_rule);
-        print_report_buckets(std::cout, "Summary by Directory", by_directory);
-        print_report_buckets(std::cout, "Summary by File", by_file);
+        std::cout << "Conflicts: " << conflict_count << "\n";
+        std::cout << "Diagnostics: " << diagnostic_count << "\n";
+        if (filtered) {
+            std::cout << "Filters:";
+            for (const auto& pattern : cli.report_rule_patterns) std::cout << " rule=" << shell_quote(pattern);
+            for (const auto& pattern : cli.report_file_patterns) std::cout << " file=" << shell_quote(pattern);
+            std::cout << "\n";
+        }
+        print_report_buckets(std::cout, "Summary by Rule", by_rule, cli.report_limit);
+        print_report_buckets(std::cout, "Summary by Directory", by_directory, cli.report_limit);
+        print_report_buckets(std::cout, "Summary by File", by_file, cli.report_limit);
         print_recommended_next_action(std::cout,
                                       cli.inputs.front(),
                                       has_errors,
                                       accepted_edit_count,
                                       review_count,
-                                      json_number_field(root, "conflict_count"),
-                                      diagnostics.array.size());
+                                      conflict_count,
+                                      diagnostic_count,
+                                      by_directory,
+                                      by_rule,
+                                      filtered);
 
-        if (edits.array.empty()) {
+        if (cli.report_summary_only) return 0;
+
+        if (edits_to_report.empty()) {
             print_report_section_empty(std::cout, "Planned Edits");
         } else {
             std::cout << "\nPlanned Edits\n";
             std::size_t index = 1;
-            for (const auto& edit : edits.array) {
-                if (edit.type != JsonValue::Type::Object) continue;
+            for (const JsonValue* edit_ptr : edits_to_report) {
+                const JsonValue& edit = *edit_ptr;
                 const JsonValue& range = object_field(edit, "range");
                 const std::string replacement = json_string_field(edit, "replacement");
                 std::cout << "  " << index++ << ". " << json_string_field(edit, "rule_id") << " ["
@@ -1211,13 +1349,13 @@ int report_plan(const CliOptions& cli) {
             }
         }
 
-        if (review_count == 0) {
+        if (findings_to_report.empty()) {
             print_report_section_empty(std::cout, "Manual Review");
         } else {
             std::cout << "\nManual Review\n";
             std::size_t index = 1;
-            for (const auto& finding : findings.array) {
-                if (finding.type != JsonValue::Type::Object || finding_is_planned_edit(finding)) continue;
+            for (const JsonValue* finding_ptr : findings_to_report) {
+                const JsonValue& finding = *finding_ptr;
                 std::cout << "  " << index++ << ". " << json_string_field(finding, "rule_id") << " ["
                           << json_string_field(finding, "severity") << ", "
                           << json_string_field(finding, "confidence") << "]\n";
@@ -1227,13 +1365,13 @@ int report_plan(const CliOptions& cli) {
             }
         }
 
-        if (conflicts.array.empty()) {
+        if (conflicts_to_report.empty()) {
             print_report_section_empty(std::cout, "Conflicts");
         } else {
             std::cout << "\nConflicts\n";
             std::size_t index = 1;
-            for (const auto& conflict : conflicts.array) {
-                if (conflict.type != JsonValue::Type::Object) continue;
+            for (const JsonValue* conflict_ptr : conflicts_to_report) {
+                const JsonValue& conflict = *conflict_ptr;
                 std::cout << "  " << index++ << ". " << optional_json_string_field(conflict, "message", "edit conflict")
                           << "\n";
                 if (const JsonValue* range = optional_object_field(conflict, "proposed_range")) {
@@ -1242,13 +1380,13 @@ int report_plan(const CliOptions& cli) {
             }
         }
 
-        if (diagnostics.array.empty()) {
+        if (diagnostics_to_report.empty()) {
             print_report_section_empty(std::cout, "Diagnostics");
         } else {
             std::cout << "\nDiagnostics\n";
             std::size_t index = 1;
-            for (const auto& diagnostic : diagnostics.array) {
-                if (diagnostic.type != JsonValue::Type::Object) continue;
+            for (const JsonValue* diagnostic_ptr : diagnostics_to_report) {
+                const JsonValue& diagnostic = *diagnostic_ptr;
                 std::cout << "  " << index++ << ". " << json_string_field(diagnostic, "severity") << " "
                           << json_string_field(diagnostic, "code") << "\n";
                 std::cout << "     " << format_optional_range(diagnostic, line_cache) << "\n";
@@ -1455,6 +1593,40 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
             options.exclude_patterns.push_back(*value);
             continue;
         }
+        if (arg == "--exclude-vendored") {
+            options.exclude_vendored = true;
+            continue;
+        }
+        if (arg == "--summary-only") {
+            options.report_summary_only = true;
+            continue;
+        }
+        if (arg == "--limit") {
+            auto value = require_value("--limit");
+            if (!value) return std::nullopt;
+            try {
+                const auto parsed_limit = std::stoul(*value);
+                if (parsed_limit == 0) throw std::invalid_argument("zero limit");
+                options.report_limit = parsed_limit;
+            } catch (const std::exception&) {
+                std::cerr << "invalid --limit value: " << *value << "\n";
+                exit_code = 2;
+                return std::nullopt;
+            }
+            continue;
+        }
+        if (arg == "--rule") {
+            auto value = require_value("--rule");
+            if (!value) return std::nullopt;
+            options.report_rule_patterns.push_back(*value);
+            continue;
+        }
+        if (arg == "--file") {
+            auto value = require_value("--file");
+            if (!value) return std::nullopt;
+            options.report_file_patterns.push_back(*value);
+            continue;
+        }
         if (arg == "--out") {
             auto value = require_value("--out");
             if (!value) return std::nullopt;
@@ -1513,6 +1685,18 @@ std::optional<CliOptions> parse_args(int argc, char** argv, int& exit_code) {
         std::cerr << (artefact_command ? "plan.json path or output directory is required\n"
                                       : "at least one input file, directory, or compile database is required\n");
         print_usage(std::cerr);
+        exit_code = 2;
+        return std::nullopt;
+    }
+    const bool has_report_options = options.report_summary_only || options.report_limit != 12 ||
+                                    !options.report_rule_patterns.empty() || !options.report_file_patterns.empty();
+    if (options.command != Command::Report && has_report_options) {
+        std::cerr << "report options require the report command\n";
+        exit_code = 2;
+        return std::nullopt;
+    }
+    if (artefact_command && (!options.include_patterns.empty() || !options.exclude_patterns.empty() || options.exclude_vendored)) {
+        std::cerr << "scan path filters require scan or plan\n";
         exit_code = 2;
         return std::nullopt;
     }

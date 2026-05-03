@@ -67,8 +67,11 @@ build/moult plan --adapter clang --clang-arg -Iinclude path/to/file.cpp
 build/moult plan --adapter clang --compile-commands build path/to/src
 build/moult plan --compile-commands build --out .moult
 build/moult plan path/to/src --exclude 'third_party/**' --include '**/*.cpp'
+build/moult plan path/to/src --exclude-vendored --out .moult
 build/moult plan --adapter textual path/to/file.cpp
 build/moult report .moult/plan.json
+build/moult report --summary-only --limit 20 .moult/plan.json
+build/moult report --rule 'modernise.use-nullptr' --file 'src/util/**' .moult/plan.json
 build/moult diff .moult/plan.json
 build/moult review .moult
 build/moult apply --backup .moult/plan.json
@@ -88,7 +91,10 @@ each entry's compile directory.
 Use repeated `--include <glob>` and `--exclude <glob>` options to narrow large
 scans. Exclude patterns win over include patterns. Relative patterns match at
 any depth, so `src/vendor/**`, `vendor/**`, and `*.cpp` are practical forms for
-repo-scale scoping.
+repo-scale scoping. `--exclude-vendored` adds a conservative built-in set of
+common vendored dependency directories such as `third_party/**`, `vendor/**`,
+`external/**`, `deps/**`, and known C/C++ library subtrees such as
+`leveldb/**`, `secp256k1/**`, and `univalue/**`.
 
 The fallback textual adapter is still available with `--adapter textual`. It skips
 comments and string/character literals, emits modernisation opportunity facts,
@@ -104,7 +110,9 @@ planned edits, manual-review findings, conflicts, and diagnostics. When the
 referenced source files are still present, report locations include line and
 column numbers as well as byte ranges. Reports also include grouped summaries by
 rule, directory, and file, plus a recommended next action for reviewing,
-scoping, or applying the plan.
+scoping, or applying the plan. Use `--summary-only` for large repositories,
+`--limit <count>` to control grouped summary length, and repeated `--rule` or
+`--file` globs to focus the report on a subsystem or migration rule.
 
 `diff` renders accepted edits as a git-style unified diff and appends
 comment-prefixed manual-review suggestions. Only the accepted-edit portion is a
